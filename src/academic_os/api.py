@@ -336,6 +336,15 @@ def create_app(core, remote=False, config_path=None, connections=None):
         principal(request)
         return core.list_mail(limit, offset, q)
 
+    @app.get("/api/v1/mail/search")
+    def mail_search(request: Request, limit: int = 50, offset: int = 0, q: str | None = None,
+                    account: str | None = None, date_mode: str = "all",
+                    start: str | None = None, end: str | None = None):
+        principal(request)
+        from .mail_query import search_mail
+        return search_mail(core, limit=limit, offset=offset, q=q, account=account,
+                           date_mode=date_mode, start=start, end=end)
+
     @app.get("/api/v1/mail/{mail_key}")
     def mail_detail(mail_key: str, request: Request):
         principal(request)

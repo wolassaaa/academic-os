@@ -66,7 +66,7 @@ async function refresh(silent = false, force = false) {
     const dashboard = await api('/dashboard');
     let data={dashboard};
     if(!state.session.remote) {
-      const endpoints=['items','mail','drafts','notifications','artifacts','jobs','config','conflicts','calendar-events','connections'];
+      const endpoints=['items','drafts','notifications','artifacts','jobs','config','conflicts','calendar-events','connections'];
       const values=await Promise.all(endpoints.map(x=>api('/'+x)));
       endpoints.forEach((key,index)=>data[key]=values[index]);
     }
@@ -88,9 +88,11 @@ async function mutate(path, method, body, keyed, message) {
 function brand() { return el('div',{class:'brand'},el('div',{class:'mark','aria-hidden':'true'},'A'),el('div',{},el('div',{class:'brand-name'},'Academic OS'),el('div',{class:'brand-sub'},'YOUR ACADEMIC COMPASS'))); }
 function shell() {
   const remote=state.session.remote;
+  state.mailSearchRequest=null;state.mailPageData=null;state.mailError=null;state.mailLoading=false;
+  if(!remote) state.mailFilters=readMailFilters();
   const nav=el('nav',{class:'nav','aria-label':'主导航'});
-  for(const [id,icon,title] of navs.filter(n=>remote?n[0]==='overview':['config','items','sources'].includes(n[0]))) nav.append(btn([el('span',{class:'nav-icon','aria-hidden':'true'},icon),title],()=>navigate(id),'nav-'+id));
-  if(!remote) nav.append(el('details',{},el('summary',{},'高级核对工具'),navs.filter(n=>!['config','items','sources'].includes(n[0])).map(([id,icon,title])=>btn([icon+' ',title],()=>navigate(id),'nav-'+id))));
+  for(const [id,icon,title] of navs.filter(n=>remote?n[0]==='overview':['config','items','mail','sources'].includes(n[0]))) nav.append(btn([el('span',{class:'nav-icon','aria-hidden':'true'},icon),title],()=>navigate(id),'nav-'+id));
+  if(!remote) nav.append(el('details',{},el('summary',{},'高级核对工具'),navs.filter(n=>!['config','items','mail','sources'].includes(n[0])).map(([id,icon,title])=>btn([icon+' ',title],()=>navigate(id),'nav-'+id))));
   app.replaceChildren(el('div',{class:'shell'},el('aside',{class:'sidebar'},brand(),el('p',{class:'nav-label'},remote?'REMOTE DASHBOARD':'WORKSPACE'),nav,el('div',{class:'sidebar-foot'},el('strong',{},remote?'远程只读看板':'本地维护后台'),remote?'仅展示脱敏状态与时间安排':'账号授权、同步设置与异常核对。',btn('退出登录',logout,'quiet small'))),el('div',{class:'workspace'},el('header',{class:'topbar'},el('div',{class:'breadcrumb'},'工作台 / ',el('strong',{id:'breadcrumb'},'总览')),el('div',{class:'toolbar'},el('div',{id:'connection',class:'connection','aria-live':'polite'}),btn('↻ 刷新',()=>refresh(), 'small'),btn('退出',logout,'small'))),el('main',{id:'main',tabindex:'-1'}))));
   renderPage();
 }
@@ -182,10 +184,74 @@ function scheduleItem(id) {
   form.addEventListener('submit',async e=>{e.preventDefault();const button=form.querySelector('[type=submit]');button.disabled=true;try{const a=isoInput(start.input.value),b=isoInput(end.input.value);if(b<=a)throw new Error('结束时间必须晚于开始时间。');await mutate('/drafts','POST',{changes:[{item_id:id,expected_version:item.version,start:a,end:b}]},true,'安排草稿已创建，请核对后确认');dialog.close();navigate('plans');}catch(error){formError(form,error);}finally{button.disabled=false;}});
   openDialog('调整学习安排',form);
 }
+const defaultMailFilters=()=>({q:'',account:'',date_mode:'all',start:'',end:'',offset:0,limit:50});
+function mailStorageKey() { return 'academic-os:mail-filters:'+state.session.username; }
+function readMailFilters() {
+  const filters=defaultMailFilters();
+  try {
+    const saved=JSON.parse(sessionStorage.getItem(mailStorageKey())||'{}');
+    for(const key of ['q','account','start','end']) if(typeof saved[key]==='string')filters[key]=saved[key];
+    if(['all','today','next7','custom','undated'].includes(saved.date_mode))filters.date_mode=saved.date_mode;
+    if(Number.isSafeInteger(saved.offset)&&saved.offset>=0)filters.offset=saved.offset;
+  } catch { /* Storage may be disabled; in-memory filters still work. */ }
+  return filters;
+}
+function saveMailFilters() {
+  try { sessionStorage.setItem(mailStorageKey(),JSON.stringify(state.mailFilters)); } catch { /* Optional persistence. */ }
+}
 function mailPage() {
-  const root=el('div'),list=el('div',{class:'mail-layout'}),search=el('input',{type:'search',placeholder:'筛选最近邮件的主题或发件人','aria-label':'搜索邮件'});
-  const draw=()=>{const query=search.value.toLocaleLowerCase();const mails=state.data.mail.filter(m=>!query||`${m.subject} ${m.from}`.toLocaleLowerCase().includes(query));list.replaceChildren(...(mails.length?mails.map(m=>el('article',{class:'mail-card'},el('div',{class:'mail-head'},el('div',{},btn(m.subject||'(无主题)',()=>openMail(m),'text-button'),el('div',{class:'row-meta'},m.from+' · '+m.account+' · '+time(m.received_at))),badge((m.date_nodes?.length||0)+' 个日期节点','neutral')),el('div',{class:'actions section-gap'},btn('查看原文与日期',()=>openMail(m),'small'),badge('模型分析未启用','warn')))):[empty(query?'最近 100 封邮件中没有匹配项':'邮件收件箱为空','成功同步 Gmail 后会显示邮件。正文仅在打开时加载。')]));};
-  search.addEventListener('input',draw);root.append(el('div',{class:'filterbar'},el('div',{class:'filters'},search),el('span',{class:'search-count'},'最近最多 100 封 · 正文按需加载')),list);draw();return root;
+  const f=state.mailFilters||defaultMailFilters();state.mailFilters=f;
+  const root=el('div',{class:'stack'}),form=el('form',{class:'panel mail-filters'});
+  const search=inputField('搜索全部邮件','search',f.q,{'aria-label':'搜索邮件',placeholder:'主题、发件人或正文关键词',maxlength:500});
+  const account=selectField('账号',[['','全部账号']],f.account,{'aria-label':'邮件账号',id:'mail-account'});
+  const modes=[['all','全部日期'],['today','今天'],['next7','未来七天'],['custom','自定义范围'],['undated','无日期']];
+  const mode=selectField('收件日期',modes,f.date_mode,{'aria-label':'邮件收件日期'});
+  const start=inputField('开始日期','date',f.start,{'aria-label':'邮件开始日期'});
+  const end=inputField('结束日期（含当天）','date',f.end,{'aria-label':'邮件结束日期'});
+  const dates=el('div',{class:'field-grid',hidden:f.date_mode!=='custom'},start.node,end.node);
+  const toggleDates=()=>{dates.hidden=mode.input.value!=='custom';start.input.required=end.input.required=!dates.hidden;};
+  mode.input.addEventListener('change',toggleDates);toggleDates();
+  form.append(el('div',{class:'field-grid'},search.node,account.node,mode.node),dates,el('div',{class:'form-actions'},el('button',{type:'submit',class:'primary'},'查询邮件'),btn('清空筛选',()=>{state.mailFilters=defaultMailFilters();saveMailFilters();state.mailPageData=null;renderPage();})),el('p',{class:'subtitle'},'查询全部已采集邮件 · 按工作台时区筛选收件日期 · 正文按需加载'));
+  form.addEventListener('submit',event=>{
+    event.preventDefault();
+    if(mode.input.value==='custom'&&end.input.value<start.input.value){formError(form,new Error('结束日期必须不早于开始日期。'));return;}
+    form.querySelector('.dialog-error')?.remove();
+    state.mailFilters={q:search.input.value.trim(),account:account.input.value,date_mode:mode.input.value,start:start.input.value,end:end.input.value,offset:0,limit:50};
+    saveMailFilters();state.mailPageData=null;loadMail();
+  });
+  root.append(form,el('section',{id:'mail-results','aria-live':'polite','aria-label':'邮件查询结果'}));
+  queueMicrotask(()=>{renderMailResults();loadMail();});return root;
+}
+async function loadMail() {
+  if(state.session?.remote||!state.session?.authenticated)return;
+  const request=Symbol();state.mailSearchRequest=request;
+  state.mailLoading=true;state.mailError=null;renderMailResults();
+  try {
+    if(state.offline)throw new Error('当前离线，请先刷新连接，再查询邮件。');
+    const f=state.mailFilters,params=new URLSearchParams();
+    for(const [key,value] of Object.entries(f))if(value!==''&&(f.date_mode==='custom'||!['start','end'].includes(key)))params.set(key,String(value));
+    const result=await api('/mail/search?'+params);
+    if(state.mailSearchRequest!==request)return;
+    if(f.offset>=result.total&&f.offset>0){f.offset=Math.max(0,Math.ceil(result.total/f.limit)-1)*f.limit;saveMailFilters();return loadMail();}
+    state.mailPageData=result;
+  } catch(error) {
+    if(state.mailSearchRequest!==request)return;
+    state.mailError=error.message;
+  } finally {
+    if(state.mailSearchRequest===request){state.mailLoading=false;renderMailResults();}
+  }
+}
+function renderMailResults() {
+  const root=document.getElementById('mail-results');if(!root||state.page!=='mail'||!state.session?.authenticated)return;
+  if(state.mailLoading){root.replaceChildren(empty('正在查询邮件…'));return;}
+  if(state.mailError){root.replaceChildren(el('div',{class:'banner error',role:'alert'},state.mailError,btn('重试查询',()=>loadMail(),'small')));return;}
+  const data=state.mailPageData;if(!data){root.replaceChildren(empty('正在准备查询…'));return;}
+  const f=state.mailFilters,account=document.getElementById('mail-account');
+  if(account){const value=account.value||f.account,accounts=[...new Set([...data.accounts,...(value?[value]:[])])];account.replaceChildren(el('option',{value:'',selected:!value},'全部账号'),...accounts.map(id=>el('option',{value:id,selected:id===value},id)));}
+  const modes={all:'全部日期',today:'今天',next7:'未来七天',custom:f.start+' 至 '+f.end,undated:'无日期'};
+  const summary=[f.account||'全部账号',modes[f.date_mode],...(f.q?['关键词：'+f.q]:[])].join(' · ');
+  const changePage=offset=>{f.offset=offset;saveMailFilters();loadMail();};
+  root.replaceChildren(el('div',{class:'filterbar'},el('div',{},el('strong',{},`共 ${data.total} 封 · ${data.total?data.offset+1:0}–${Math.min(data.offset+data.limit,data.total)}`),el('p',{class:'subtitle'},summary+' · '+data.timezone)),el('div',{class:'actions'},btn('上一页',()=>changePage(Math.max(0,f.offset-f.limit)),'small',f.offset===0),btn('下一页',()=>changePage(f.offset+f.limit),'small',f.offset+f.limit>=data.total))),el('div',{class:'mail-layout'},data.items.length?data.items.map(m=>el('article',{class:'mail-card'},el('div',{class:'mail-head'},el('div',{},btn(m.subject||'(无主题)',()=>openMail(m),'text-button'),el('div',{class:'row-meta'},m.from+' · '+m.account+' · '+(m.received_at?time(m.received_at):'无收件日期'))),badge('✉ 邮件','neutral')),el('div',{class:'actions section-gap'},btn('查看原文与日期',()=>openMail(m),'small'),badge((m.date_nodes?.length||0)+' 个日期节点','neutral')))):empty('没有匹配的邮件','调整筛选条件或清空筛选；查询覆盖全部已采集邮件。')));
 }
 async function openMail(mail) {
   const content=el('div',{},empty('正在加载邮件原文…','正文按需读取，不包含在定期刷新中。'));

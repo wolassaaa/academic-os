@@ -150,8 +150,14 @@ class Core:
                     continue
                 item = self._get(db, previous["item_id"]) if previous else None
                 if item is None and normalized.get("course"):
-                    candidate = db.execute("SELECT document FROM items WHERE json_extract(document,'$.dedup_key')=? LIMIT 1", (canonical(normalized["course"]) + ":" + canonical(normalized["title"]),)).fetchone()
-                    item = json.loads(candidate[0]) if candidate else None
+                    # A title is not an identity for two activities from the same
+                    # source. Only preserve an unambiguous cross-source match.
+                    candidates = db.execute(
+                        "SELECT document FROM items i WHERE json_extract(document,'$.dedup_key')=? "
+                        "AND NOT EXISTS (SELECT 1 FROM source_records s WHERE s.item_id=i.id AND s.source=?)",
+                        (canonical(normalized["course"]) + ":" + canonical(normalized["title"]), source),
+                    ).fetchall()
+                    item = json.loads(candidates[0][0]) if len(candidates) == 1 else None
                 new = item is None
                 if new:
                     item = self._new_item(normalized)
@@ -174,7 +180,9 @@ class Core:
                 evidence = {"source": source, "source_id": sid, **normalized, "observed_at": utcnow()}
                 item["evidence"] = existing_evidence + [evidence]
                 status = normalized.get("submission_status")
-                if status:
+                # A failed observation is not evidence that submitted work reopened.
+                # Keep the unknown observation in evidence, not as a destructive status update.
+                if status and (status != "unknown" or new or item["status"] == "unknown"):
                     item["status"] = {"not_started": "pending"}.get(status, status)
                 if item["review_state"] != "conflict":
                     item["review_state"] = normalized.get("review_state") or ("ready" if item["source_due_at"] else "needs_date")
