@@ -1,5 +1,7 @@
 # HTTP 业务接口 v1
 
+首轮迭代新增 `GET /api/v1/mail/search`：需本机登录或 `read` token，返回 `{items,total,limit,offset,accounts,timezone}`；远程端不开放。参数为 `limit`（1–300，默认 50）、`offset`、`q`、`account`、`date_mode`（all/today/next7/custom/undated），custom 需要 `start`、`end`（YYYY-MM-DD）。日期按设置时区计算，结束日包含当天；关键词匹配主题、发件人和正文，列表不返回正文。既有 `/mail` 列表接口保持兼容。
+
 本地地址 `http://127.0.0.1:8765`。以登录会话或 Agent Bearer token 鉴权后使用 `/api/v1`；完整机器可读规格由 `/openapi.json` 提供，本地 `/docs` 可交互检查。远程入口不提供 OpenAPI、邮件正文或以下修改资源。
 
 桌面启动端口冲突时自动选择空闲端口并写回配置，启动窗口显示实际地址。MCP 默认读取同目录 config.json 的实际端口，也支持 --config、--base-url 或 ACADEMIC_OS_URL 覆盖。CLI/服务保持固定配置端口。

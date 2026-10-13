@@ -138,8 +138,8 @@ def main():
                 page.get_by_role("button", name="✕", exact=True).click()
                 page.get_by_role("button", name="↻ 刷新", exact=True).click()
                 page.get_by_role("button", name="邮件收件箱", exact=False).click()
-                assert not any(path.startswith("/mail/") for path in local_requests)
-                expect(page.get_by_text("最近最多 100 封 · 正文按需加载", exact=True)).to_be_visible()
+                assert not any(path.startswith("/mail/") and not path.startswith("/mail/search?") for path in local_requests)
+                expect(page.get_by_text("共 1 封 · 1–1", exact=True)).to_be_visible()
                 assert page.get_by_text(mail["body"], exact=True).count() == 0
                 page.get_by_role("button", name="查看原文与日期").click()
                 expect(page.get_by_role("dialog").get_by_text(mail["body"], exact=True)).to_be_visible()

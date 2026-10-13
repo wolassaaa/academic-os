@@ -17,4 +17,12 @@ backups/
 *.zip
 artifacts/
 oauth-client.json
+client_secret*.json
+credentials*.json
+*token*.json
+*.pem
+*.pfx
+*.key
+Runtime/
+History/
 !config.example.json

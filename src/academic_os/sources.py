@@ -176,22 +176,29 @@ def collect_moodle(core):
 def collect_local(core):
     results = {}
     for kind, filename in core.settings.local_sources.items():
-        path = Path(filename)
-        if not path.exists():
-            core.source_health("local:" + kind, False, "file_missing")
-            continue
-        if path.is_dir():
-            documents = [{"path": str(p.relative_to(path)), "bytes": p.stat().st_size, "modified": p.stat().st_mtime} for p in path.rglob("*") if p.is_file()]
-            value = {"files": documents, "root": str(path), "count": len(documents)}
-        else:
-            value = json.loads(path.read_text(encoding="utf-8"))
-            if kind == "assessment_baseline":
-                from .moodle_process import baseline_records
-                core.ingest("assessment_baseline", baseline_records(path))
-        with core.db.transaction() as db:
-            db.execute("INSERT OR REPLACE INTO artifacts VALUES(?,?,?)", ("local:" + kind, kind, dumps({"data": value, "updated_at": utcnow()})))
-        core.source_health("local:" + kind, True)
-        results[kind] = "ok"
+        try:
+            path = Path(filename)
+            if not path.exists():
+                core.source_health("local:" + kind, False, "file_missing")
+                results[kind] = {"error": "file_missing"}
+                continue
+            if path.is_dir():
+                documents = [{"path": str(p.relative_to(path)), "bytes": p.stat().st_size, "modified": p.stat().st_mtime} for p in path.rglob("*") if p.is_file()]
+                value = {"files": documents, "root": str(path), "count": len(documents)}
+            else:
+                value = json.loads(path.read_text(encoding="utf-8"))
+                if kind == "assessment_baseline":
+                    from .moodle_process import baseline_records
+                    core.ingest("assessment_baseline", baseline_records(path))
+            with core.db.transaction() as db:
+                db.execute("INSERT OR REPLACE INTO artifacts VALUES(?,?,?)", ("local:" + kind, kind, dumps({"data": value, "updated_at": utcnow()})))
+            core.source_health("local:" + kind, True)
+            results[kind] = "ok"
+        except Exception as exc:
+            # One private file's contents must neither leak nor block remote collectors.
+            error = type(exc).__name__
+            core.source_health("local:" + kind, False, error)
+            results[kind] = {"error": error}
     return results
 
 

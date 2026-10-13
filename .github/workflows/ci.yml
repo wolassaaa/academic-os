@@ -1,0 +1,41 @@
+name: Source checks
+
+on: [push, pull_request]
+
+permissions:
+  contents: read
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ['3.11', '3.14']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Install development dependencies
+        run: |
+          python -m pip install --upgrade pip setuptools wheel
+          python -m pip install -e ".[dev]"
+      - name: Check publishable source
+        run: python scripts/check-publishable.py
+      - name: Lint and JavaScript syntax
+        run: |
+          python -m ruff check src tests scripts/portable_entry.py scripts/package-handoff.py scripts/check-publishable.py
+          node --check src/academic_os/web/app.js
+      - name: Unit and integration regressions
+        env:
+          PYTEST_DISABLE_PLUGIN_AUTOLOAD: '1'
+        run: python -m pytest -q
+      - name: Browser regressions with disposable data
+        if: matrix.python == '3.14'
+        run: |
+          python -m playwright install chromium
+          python tests/browser_check.py
+          python tests/mail_browser_check.py "${{ runner.temp }}/mail-screenshots"
+      - name: Build source wheel
+        run: python -m pip wheel --no-deps --no-build-isolation --wheel-dir dist .

@@ -1,5 +1,7 @@
 # Academic OS 2.0
 
+开发路线与检查记录：[迭代计划](docs/ROADMAP.md) · [导入前复核](docs/PROJECT-REVIEW-20261013.md)。当前 main 保存交接源码基线，首轮改进通过独立 PR 审阅。源码及 CI 结果不表示便携 EXE 已更新。
+
 后台首页为“账号与同步”：真实 Google 浏览器授权、多个账号管理、日历选择、Moodle 学校网页登录与旧授权接入。连接保存后立即生效；作业与截止供维护核对，日常使用 Google / Apple 日历即可。[账号连接步骤](docs/CONNECTIONS.md)。
 
 **Windows 免安装试用：** 使用新的便携 ZIP，完整解压后双击 `AcademicOS.exe`，无需装 Python 或联网下载依赖。首次在浏览器创建账号，启动器提供图形化密码重置与停止按钮。详见 [免安装版说明](docs/PORTABLE.md)。下面的 Python 安装流程面向源码开发/部署。
