@@ -1,0 +1,20 @@
+{
+  "data_dir": "data",
+  "timezone": "Asia/Hong_Kong",
+  "mode": "shadow",
+  "host": "127.0.0.1",
+  "port": 8765,
+  "dashboard_port": 8766,
+  "secure_cookies": true,
+  "session_hours": 12,
+  "sync_interval_seconds": 300,
+  "lease_seconds": 1200,
+  "google_proxy": null,
+  "google_accounts": [],
+  "feishu": {},
+  "moodle": {"enabled": false},
+  "local_sources": {},
+  "notifications": {"email_recipients": [], "email_on_failure": true},
+  "availability": {"weekdays": [0, 1, 2, 3, 4, 5, 6], "start": "09:00", "end": "21:00", "block_minutes": 60},
+  "model": {"enabled": false, "provider": null, "timeout_seconds": 30}
+}

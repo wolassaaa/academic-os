@@ -1,0 +1,18 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Academic OS 2.0</title><style>body{margin:0;background:#f6f7f9;color:#222;font:17px/1.8 system-ui,sans-serif}
+main{max-width:780px;margin:40px auto;padding:28px;background:white;border-radius:12px}
+nav{display:flex;gap:24px;border-bottom:1px solid #ddd;padding-bottom:16px}
+a{color:#185abc}h1{font-size:32px}h2{font-size:23px;margin-top:32px}
+footer{margin-top:36px;color:#666;font-size:14px}@media(max-width:600px){main{margin:0;padding:22px;border-radius:0}}</style></head><body><main>
+<nav><a href="index.html">Academic OS</a><a href="privacy.html">隐私声明</a></nav>
+<h1>Academic OS 2.0</h1>
+<p>Academic OS 是供本人使用的 Windows 学业管理工具，集中查看学校邮件、课程作业、截止日期和日程安排。日常安排可以在 Google 日历及连接同一 Google 账号的 Apple 日历应用中查看。</p>
+<h2>功能</h2>
+<ul><li>本人登录 Google 后，读取邮箱和本人选择的日历。</li><li>登录 HKBU Moodle 后，只读采集课程、作业、截止日期及可取得的提交状态。</li><li>手动维护事项，生成可核对的执行计划；确认后才执行日历写入。</li><li>记录同步状态、冲突与通知结果，提供本机管理页面和可选的独立登录只读看板。</li><li>为 Agent 保留独立权限接口及 Markdown 汇总。当前版本不启用模型分析。</li></ul>
+<h2>数据与访问</h2>
+<p>程序后台运行在用户自己的 Windows 设备上。Google 与学校密码不交给本程序保存；离线授权由 Windows 凭据管理器保存，业务数据保存在该设备的 SQLite 数据库中。外部日历写入和通知默认处于预览状态，启用实际执行前需要用户确认。</p>
+<p>Google 登录、邮件与日历 API、学校服务需要可用网络及本人授权。学校服务权限可能导致部分课程无法读取，程序明确显示不完整状态。</p>
+<p>请阅读本站的隐私声明。应用支持邮箱：hanyuanwang476@gmail.com。</p>
+<footer>独立的个人学业管理工具，与 Google 或 HKBU 无官方隶属关系。</footer>
+</main></body></html>

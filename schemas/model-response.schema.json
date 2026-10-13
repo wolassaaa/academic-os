@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://academic-os.local/schemas/model-response.schema.json",
+  "title": "Academic OS reserved model response v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "request_id", "status", "facts", "suggestions", "warnings", "error", "usage"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "request_id": {"type": ["string", "null"]},
+    "status": {"enum": ["disabled", "ok", "partial", "error"]},
+    "facts": {"type": "array", "items": {"type": "object", "required": ["kind", "value", "evidence", "confidence"], "properties": {"kind": {"type": "string"}, "value": {}, "evidence": {"type": "string"}, "confidence": {"type": "number", "minimum": 0, "maximum": 1}}, "additionalProperties": false}},
+    "suggestions": {"type": "array", "items": {"type": "object", "required": ["kind", "reason"], "properties": {"kind": {"type": "string"}, "reason": {"type": "string"}, "changes": {"type": "array", "items": {"type": "object"}}}, "additionalProperties": false}},
+    "warnings": {"type": "array", "items": {"type": "string"}},
+    "error": {"type": ["object", "null"], "properties": {"code": {"type": "string"}, "retryable": {"type": "boolean"}}, "required": ["code", "retryable"], "additionalProperties": false},
+    "usage": {"type": ["object", "null"], "properties": {"input_tokens": {"type": "integer", "minimum": 0}, "output_tokens": {"type": "integer", "minimum": 0}}, "additionalProperties": false}
+  },
+  "allOf": [{"if": {"properties": {"status": {"const": "disabled"}}}, "then": {"properties": {"facts": {"maxItems": 0}, "suggestions": {"maxItems": 0}, "error": {"type": "null"}, "usage": {"type": "null"}}}}]
+}

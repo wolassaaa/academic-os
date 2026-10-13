@@ -1,0 +1,69 @@
+{
+  "audit_date": "2026-10-12",
+  "origin": "Internal legacy Academic OS academic_os_src/academic_os",
+  "license": "internal/unknown; no open-source license asserted",
+  "files": [
+    {
+      "original_module": "client.py",
+      "original_sha256": "f54c3a28e736ba81e4e164742a7a631a0a651dcdf753c69283b8292a3c66a5a0",
+      "retained_module": "moodle_client.py",
+      "retained_sha256": "8496a8a373f24c27ea409c29fdd58621f24de8ce7e83fb3978c97909396be491",
+      "modified_date": "2026-10-13",
+      "modification": "Use existing HTTPX for verified direct read-only school transport after urllib response read timeout; preserve HTTPS verification and function allowlist."
+    },
+    {
+      "original_module": "models.py",
+      "original_sha256": "5f3e92d97dca74fec7eb9995b2f1f6bfb6dea12d1eee8b561f5d58462b9bc0f6",
+      "retained_module": "models.py",
+      "retained_sha256": "5f3e92d97dca74fec7eb9995b2f1f6bfb6dea12d1eee8b561f5d58462b9bc0f6"
+    },
+    {
+      "original_module": "deadlines.py",
+      "original_sha256": "4b52a62412d75a6b0ddb8952d90315c8146b16cfffacc711b8c50194a584fd8b",
+      "retained_module": "deadlines.py",
+      "retained_sha256": "59ac578f14664150547ce1cbdcc08b031e16daef50ea32b700dc18cd8ac791d4"
+    }
+  ],
+  "audited_not_copied": [
+    {
+      "module": "moodle.py",
+      "sha256": "1105af3459f0106765e8fea21686e25ec10acbe5858cb787a0441c83f23b2332",
+      "copied": false
+    },
+    {
+      "module": "full_activities.py",
+      "sha256": "1ab2877ec1ba433452d3212bc793d69d254944c1d6be49176f98b75a08dd0e21",
+      "copied": false
+    },
+    {
+      "module": "submissions.py",
+      "sha256": "ae2730d266b50532274a2e1314901cdcdf9abcd3d970289ed6a81ea178e3c4b2",
+      "copied": false
+    },
+    {
+      "module": "submission_index.py",
+      "sha256": "47e12c2dea253ba08865c1bcfea37d3f243193b2c5dd7ce05badaa23b47fcc0c",
+      "copied": false
+    },
+    {
+      "module": "baseline_assessments.py",
+      "sha256": "bd94e775f603e44ad665d8bd01db617ff5683dbefab0be07b009168f868e37c9",
+      "copied": false
+    },
+    {
+      "module": "hermes.py",
+      "sha256": "88d0094cf4dae9a07ab3d22535f87ee87131c5f77f0e070ccc4f06b2c36363a1",
+      "copied": false
+    },
+    {
+      "module": "store.py",
+      "sha256": "fbe0766d205b6b6a2fef74ad9ba40a1bb47f012979cb1ac35fe36931c423a91c",
+      "copied": false
+    },
+    {
+      "module": "credentials.py",
+      "sha256": "300ad8a67d6669b5aaa0a84ef33bb86fe16527c93890ed2a8085706f95d6a279",
+      "copied": false
+    }
+  ]
+}
