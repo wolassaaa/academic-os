@@ -176,6 +176,9 @@ def launch_gui(config: Path):
 
     root.after(200, poll)
     root.mainloop()
+    # poll refers to itself through a closure. Break that cycle while still on
+    # the GUI thread, so its StringVar is not finalized by a later worker GC.
+    poll = None
     stop.set()
     thread.join(timeout=180)
     return 1 if reported else 0

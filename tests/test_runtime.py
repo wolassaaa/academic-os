@@ -53,13 +53,21 @@ def test_instance_lock_rejects_other_process_and_survives_crash(tmp_path):
         pass
 
 
-def test_both_real_servers_one_worker_and_graceful_stop(tmp_path):
+def test_both_real_servers_one_worker_and_graceful_stop(tmp_path, monkeypatch):
     runtime = module()
     settings = Settings(data_dir=tmp_path, port=free_port(), dashboard_port=free_port())
     core = Core(Database(settings.database_path), settings)
     stop = threading.Event()
     errors = []
     service = runtime.Runtime(core)
+    original_get = httpx.get
+    probes = []
+    def startup_probe(*args, **kwargs):
+        if not probes:
+            probes.append("accepted_before_ready")
+            raise httpx.ReadTimeout("synthetic transition between socket bind and HTTP readiness")
+        return original_get(*args, **kwargs)
+    monkeypatch.setattr(httpx, "get", startup_probe)
     def run():
         try:
             service.run(stop)
@@ -72,13 +80,16 @@ def test_both_real_servers_one_worker_and_graceful_stop(tmp_path):
         for port in (settings.port, settings.dashboard_port):
             while True:
                 try:
-                    result = httpx.get(f'http://127.0.0.1:{port}/api/v1/session', timeout=1)
+                    result = httpx.get(f'http://127.0.0.1:{port}/api/v1/session', timeout=1, trust_env=False)
                     assert result.status_code == 200
                     break
-                except httpx.ConnectError:
+                except (httpx.ConnectError, httpx.TimeoutException):
+                    # The runtime binds sockets before Uvicorn accepts HTTP;
+                    # transient reads can time out within this same bounded budget.
+                    assert not errors, errors
                     assert time.monotonic() < until
                     time.sleep(.05)
-        assert httpx.post(f'http://127.0.0.1:{settings.dashboard_port}/api/v1/items', json={'title':'x'}).status_code == 404
+        assert httpx.post(f'http://127.0.0.1:{settings.dashboard_port}/api/v1/items', json={'title':'x'}, trust_env=False).status_code == 404
         until = time.monotonic() + 5
         while not core.health()['worker_online'] and time.monotonic() < until:
             time.sleep(.05)

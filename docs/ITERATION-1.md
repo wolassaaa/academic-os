@@ -14,7 +14,8 @@
 
 - 原始基线：150 tests passed。
 - 新增回归先复现：8 failed, 16 passed（邮件特殊字符／日期上界及来源可靠性用例）。
-- 当前完整测试：183 passed；一次完整运行报告现有 Tkinter Variable 析构线程警告，已保留原始记录，没有隐藏警告。
+- 当前完整测试：183 passed。首次 Windows CI 暴露启动探测 ReadTimeout 和 Tkinter Variable 延迟析构问题；新增确定性回归先得到 2 failed，再修复至 2 passed，保留失败日志。
+- GUI 退出时释放自引用轮询闭包，避免 Tkinter 状态被后续 worker GC 析构；启动探测在原有预算内重试短暂超时，不延长超时预算或跳过真实 HTTP 断言。
 - Ruff、JavaScript 语法检查通过。
 - 原有桌面／手机／远程只读浏览器回归通过。
 - 新增 123 封隔离邮件浏览器场景通过：翻页、全库查询、条件保留、空结果、日期边界、重试和无日期。

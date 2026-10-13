@@ -18,6 +18,8 @@
 | P2 | sources.py collect_local / worker.py collect | 一个损坏的本地 JSON 阻断后续远程采集 | 单个本地来源隔离失败，记录错误且继续采集 |
 | P2 | 新 mail_query.py | 在原始 JSON 上搜索导致引号／反斜杠漏匹配和元数据误匹配 | 对解码后的主题、发件人、正文查询 |
 | P3 | 新 mail_query.py | 极端结束日期产生未捕获溢出 | 返回 422 校验错误 |
+| P2 | portable.py launch_gui | 自引用轮询闭包延迟保留 Tkinter Variable，后续 worker GC 跨线程析构 | GUI 线程退出前打破闭包循环；weakref＋禁用循环 GC 的确定性回归 |
+| P3 | tests/test_runtime.py | socket 已绑定而 HTTP 尚未就绪时，单次 ReadTimeout 使启动测试失败 | 原有预算内重试瞬时超时，并继续断言后台未报错和真实 API 可用 |
 
 ## 已复现、后续迭代处理
 

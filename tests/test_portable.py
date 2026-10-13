@@ -49,6 +49,8 @@ def test_moodle_subprocess_uses_frozen_dispatch_instead_of_python_module(monkeyp
 
 
 def test_desktop_controls_reset_password_and_gracefully_stop(tmp_path, monkeypatch):
+    import gc
+    import weakref
     tk = pytest.importorskip("tkinter")
     from tkinter import simpledialog, messagebox
     from academic_os import portable
@@ -68,6 +70,13 @@ def test_desktop_controls_reset_password_and_gracefully_stop(tmp_path, monkeypat
     auth = Auth(core.db, settings)
     auth.set_password("owner", "previous-password")
     original_tk = tk.Tk
+    original_variable = tk.StringVar
+    status_refs = []
+    def variable_factory(*args, **kwargs):
+        variable = original_variable(*args, **kwargs)
+        status_refs.append(weakref.ref(variable))
+        return variable
+    monkeypatch.setattr(tk, "StringVar", variable_factory)
     opened, notices, errors = [], [], []
     monkeypatch.setattr(portable.webbrowser, "open", lambda url: opened.append(url))
     monkeypatch.setattr(simpledialog, "askstring", lambda *a, **k: "eight888")
@@ -99,7 +108,16 @@ def test_desktop_controls_reset_password_and_gracefully_stop(tmp_path, monkeypat
         return root
 
     monkeypatch.setattr(tk, "Tk", factory)
-    assert portable.launch_gui(config) == 0
+    # GUI state must be released by the GUI thread, not by a later worker's GC.
+    was_enabled = gc.isenabled()
+    gc.disable()
+    try:
+        assert portable.launch_gui(config) == 0
+        assert status_refs and all(reference() is None for reference in status_refs)
+    finally:
+        if was_enabled:
+            gc.enable()
+        gc.collect()
     assert opened and notices and not errors
     assert auth.login("owner", "eight888", "test", False)
     with core.db.connect() as db:
