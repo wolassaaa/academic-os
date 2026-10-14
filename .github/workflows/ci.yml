@@ -32,7 +32,7 @@ jobs:
         run: python scripts/check-publishable.py
       - name: Lint and JavaScript syntax
         run: |
-          python -m ruff check src tests scripts/portable_entry.py scripts/package-handoff.py scripts/check-publishable.py
+          python -m ruff check src tests scripts/portable_entry.py scripts/package-handoff.py scripts/check-publishable.py scripts/hermes-config.py
           node --check src/academic_os/web/app.js
       - name: Unit and integration regressions
         env:
@@ -45,5 +45,6 @@ jobs:
           python tests/browser_check.py
           python tests/mail_browser_check.py "${{ runner.temp }}/mail-screenshots"
           python tests/triage_browser_check.py "${{ runner.temp }}/triage-screenshots"
+          python tests/tags_digest_browser_check.py "${{ runner.temp }}/tags-screenshots"
       - name: Build source wheel
         run: python -m pip wheel --no-deps --no-build-isolation --wheel-dir dist .

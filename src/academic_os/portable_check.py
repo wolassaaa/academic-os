@@ -40,7 +40,18 @@ def diagnose_mail_triage(directory):
     assert len(core.get_mail('diagnostic:m1')['linked_items']) == 2
     assert core.get_mail('diagnostic:m1')['body'] == 'offline original'
     assert len(Core(core.db, settings).list_items(view='formal')) == 1
-    return ['mail_triage_independent_candidates', 'mail_triage_confirm_idempotency', 'mail_triage_reminder_gate', 'mail_triage_ignore_restore_unknown_date', 'mail_triage_links_restart']
+    from .tags import Tags
+    from .mail_digest import digest, feed, acknowledge
+    tag = Tags(core).create('Offline course', 'course', 'diagnostic', 'offline-tag')
+    tagged = Tags(core).assign(first['id'], [tag['id']], confirmed['version'], 'offline-tags')
+    assert tagged['tags'][0]['id'] == tag['id']
+    assert Core(core.db, settings).get_item(first['id'])['tags'][0]['id'] == tag['id']
+    assert digest(core)['items'][0]['body_excerpt'] == 'offline original'
+    arrivals = feed(core)
+    assert arrivals['items'][0]['key'] == 'diagnostic:m1'
+    acknowledge(core, 'hermes', arrivals['next_cursor'], 0)
+    assert feed(core)['items'] == []
+    return ['mail_triage_independent_candidates', 'mail_triage_confirm_idempotency', 'mail_triage_reminder_gate', 'mail_triage_ignore_restore_unknown_date', 'mail_triage_links_restart', 'scoped_tags_persistence', 'mail_original_digest', 'mail_durable_feed']
 
 
 def diagnose():

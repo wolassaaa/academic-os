@@ -2,6 +2,8 @@
 
 邮件候选分流与逐条核对见 [迭代 2 使用说明](docs/ITERATION-2.md)。未确认候选保留原邮件和新邮件通知，不产生截止提醒；确认后成为正式邮件待办。
 
+课程／作业／小组多标签、含原文摘录的邮件简报及增量消费见 [迭代 3](docs/ITERATION-3.md)；[Hermes 接入](docs/HERMES.md) · [轻量化实测与后续优先级](docs/PERFORMANCE.md)。
+
 开发路线与检查记录：[迭代计划](docs/ROADMAP.md) · [导入前复核](docs/PROJECT-REVIEW-20261013.md)。当前 main 保存交接源码基线，首轮改进通过独立 PR 审阅。源码及 CI 结果不表示便携 EXE 已更新。
 
 后台首页为“账号与同步”：真实 Google 浏览器授权、多个账号管理、日历选择、Moodle 学校网页登录与旧授权接入。连接保存后立即生效；作业与截止供维护核对，日常使用 Google / Apple 日历即可。[账号连接步骤](docs/CONNECTIONS.md)。
