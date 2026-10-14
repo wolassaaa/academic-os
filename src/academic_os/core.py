@@ -9,6 +9,7 @@ import uuid
 from datetime import datetime, timezone
 
 from .db import dumps
+from .mail_triage import annotate, formal, invalidate_pending_due, linked_items, migrate, pure_mail, review_state
 
 
 class Conflict(ValueError):
@@ -44,6 +45,7 @@ class Core:
         with self.db.transaction() as connection:
             for row in connection.execute("SELECT document FROM items WHERE json_extract(document,'$.dedup_key') IS NULL AND json_extract(document,'$.course') != ''").fetchall():
                 self._put(connection, json.loads(row[0]))
+        migrate(self)
 
     @staticmethod
     def audit(db, actor, action, entity_id, detail):
@@ -83,6 +85,7 @@ class Core:
 
     def create_item(self, data, actor="user", key=None):
         item = self._new_item(data)
+        item['manual_origin'] = True
         with self.db.transaction() as db:
             if key:
                 fp, replay = self._operation(db, "create:" + key, data)
@@ -98,9 +101,51 @@ class Core:
         with self.db.connect() as db:
             return self._get(db, item_id)
 
-    def list_items(self):
+    def list_items(self, view='all'):
+        if view not in {'all', 'formal', 'mail_pending', 'mail_ignored'}:
+            raise ValueError('Unknown item view')
         with self.db.connect() as db:
-            return [json.loads(r[0]) for r in db.execute("SELECT document FROM items ORDER BY updated_at DESC")]
+            items = [json.loads(r[0]) for r in db.execute("SELECT document FROM items ORDER BY updated_at DESC")]
+        return [item for item in items if view == 'all' or view == 'formal' and formal(item)
+                or view == 'mail_pending' and review_state(item) == 'pending'
+                or view == 'mail_ignored' and review_state(item) == 'ignored']
+
+    def review_mail_item(self, item_id, action, expected_version, key, changes=None, actor='user'):
+        changes = changes or {}
+        if action not in {'confirm', 'ignore', 'restore'} or not key or len(key) > 200:
+            raise ValueError('Invalid mail review action or idempotency key')
+        if set(changes) - {'title', 'source_due_at', 'estimate_minutes', 'priority'} or action != 'confirm' and changes:
+            raise ValueError('Invalid mail review changes')
+        with self.db.transaction() as db:
+            payload = {'item_id': item_id, 'action': action, 'expected_version': expected_version, 'changes': changes}
+            fp, replay = self._operation(db, 'mail-review:' + key, payload)
+            if replay is not None:
+                return replay
+            item = self._get(db, item_id)
+            if item['version'] != expected_version:
+                raise Conflict('item_version_changed')
+            state = review_state(item)
+            if not pure_mail(item) or state != ('ignored' if action == 'restore' else 'pending'):
+                raise Conflict('mail_review_state_changed')
+            if action == 'confirm':
+                if db.execute("SELECT 1 FROM conflicts WHERE item_id=? AND state='open'", (item_id,)).fetchone():
+                    raise Conflict('resolve_conflict_first')
+                old_due = item['source_due_at']
+                item.update(changes)
+                self._new_item(item)
+                item['source_due_at'] = iso(item['source_due_at'])
+                if item['source_due_at'] != old_due:
+                    item['deadline_revision'] = item.get('deadline_revision', 1) + 1
+                item['review_state'] = 'ready' if item['source_due_at'] else 'needs_date'
+            item['mail_review'] = {'state': {'confirm': 'confirmed', 'ignore': 'ignored', 'restore': 'pending'}[action],
+                                   'revision': item.get('mail_review', {}).get('revision', 0) + 1,
+                                   'reviewed_by': actor, 'reviewed_at': utcnow()}
+            item.update(version=item['version'] + 1, updated_at=utcnow())
+            self._put(db, item)
+            invalidate_pending_due(db, item_id)
+            self.audit(db, actor, 'mail.' + action, item_id, {'version': item['version']})
+            db.execute('INSERT INTO operations VALUES(?,?,?)', ('mail-review:' + key, fp, dumps(item)))
+            return item
 
     def update_item(self, item_id, changes, expected_version, actor="user"):
         allowed = {"title", "estimate_minutes", "priority", "status", "review_state", "source_due_at"}
@@ -146,7 +191,10 @@ class Core:
                     normalized["due_at"] = iso(normalized["due_at"])
                 previous = db.execute("SELECT * FROM source_records WHERE source=? AND source_id=?", (source, sid)).fetchone()
                 if previous and previous["document"] == dumps(normalized):
-                    out.append(self._get(db, previous["item_id"]))
+                    unchanged = self._get(db, previous['item_id'])
+                    annotate(db, unchanged)
+                    self._put(db, unchanged)
+                    out.append(unchanged)
                     continue
                 item = self._get(db, previous["item_id"]) if previous else None
                 if item is None and normalized.get("course"):
@@ -161,16 +209,22 @@ class Core:
                 new = item is None
                 if new:
                     item = self._new_item(normalized)
+                elif not item.get('evidence'):
+                    item['manual_origin'] = True
                 old_due = item["source_due_at"]
                 old_status = item["status"]
+                protected = source.startswith('gmail:') and item.get('mail_review', {}).get('state') == 'confirmed'
                 if previous:
                     for field in ("title", "course", "kind", "weight_pct"):
-                        if field in normalized:
+                        if field in normalized and not (protected and field == 'title'):
                             item[field] = normalized[field]
                 due = normalized.get("due_at")
                 existing_evidence = [e for e in item["evidence"] if not (e["source"] == source and e["source_id"] == sid)]
                 if not new and "due_at" in normalized and due != item["source_due_at"]:
-                    if previous and len(existing_evidence) == 0:
+                    if protected:
+                        self._conflict(db, 'source_date', item['id'], {'current': item['source_due_at'], 'incoming': due, 'source': source, 'source_id': sid})
+                        item['review_state'] = 'conflict'
+                    elif previous and len(existing_evidence) == 0:
                         item["source_due_at"] = due
                     elif due and item["source_due_at"]:
                         self._conflict(db, "source_date", item["id"], {"current": item["source_due_at"], "incoming": due, "source": source, "source_id": sid})
@@ -184,8 +238,9 @@ class Core:
                 # Keep the unknown observation in evidence, not as a destructive status update.
                 if status and (status != "unknown" or new or item["status"] == "unknown"):
                     item["status"] = {"not_started": "pending"}.get(status, status)
-                if item["review_state"] != "conflict":
+                if item["review_state"] != "conflict" and not protected:
                     item["review_state"] = normalized.get("review_state") or ("ready" if item["source_due_at"] else "needs_date")
+                annotate(db, item)
                 item.update(version=item["version"] if new else item["version"] + 1, updated_at=utcnow())
                 self._put(db, item)
                 if old_due != item["source_due_at"]:
@@ -323,6 +378,8 @@ class Core:
                 return replay
             for change in clean:
                 item = self._get(db, change["item_id"])
+                if not formal(item):
+                    raise Conflict('mail_candidate_requires_review')
                 if item["version"] != change["expected_version"]:
                     raise Conflict("item_version_changed")
             result = {"id": identifier("draft"), "changes": clean, "state": "draft", "created_at": utcnow(), "metadata": metadata or {}}
@@ -349,6 +406,8 @@ class Core:
             items = [self._get(db, c["item_id"]) for c in draft["changes"]]
             self._validate_schedule(db, draft["changes"])
             for item, change in zip(items, draft["changes"]):
+                if not formal(item):
+                    raise Conflict('mail_candidate_requires_review')
                 if item["version"] != change["expected_version"]:
                     raise Conflict("item_version_changed")
                 if item["status"] in {"completed", "submitted", "cancelled"}:
@@ -436,7 +495,9 @@ class Core:
             row = db.execute("SELECT document FROM mail WHERE id=?", (mail_key,)).fetchone()
             if not row:
                 raise KeyError(mail_key)
-            return json.loads(row[0])
+            result = json.loads(row[0])
+            result['linked_items'] = linked_items(db, mail_key)
+            return result
 
     def list_artifacts(self):
         with self.db.connect() as db:

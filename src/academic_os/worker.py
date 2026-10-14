@@ -15,6 +15,7 @@ from .notifications import Notifications
 from .providers import Feishu, Google
 from .security import SecretStore
 from .sources import collect_gmail, collect_local, collect_moodle
+from .mail_triage import formal
 
 
 def has_failure(value):
@@ -183,7 +184,7 @@ class Worker:
         self.notifications.generate()
         local_now = datetime.now(ZoneInfo(self.core.settings.timezone))
         if local_now.hour >= 9:
-            active = [i for i in self.core.list_items() if i["status"] not in {"completed", "submitted", "cancelled"}]
+            active = [i for i in self.core.list_items() if formal(i) and i["status"] not in {"completed", "submitted", "cancelled"}]
             document = {"title": "Academic OS 今日简报", "body": "\n".join(f"• {i['title']}｜截止 {i['source_due_at'] or '待公布'}｜安排 {i['scheduled_start'] or '未安排'}" for i in active[:30]) or "暂无待处理事项。"}
             key = "daily:" + local_now.date().isoformat()
             self.notifications.queue("workbench", document, key + ":workbench")

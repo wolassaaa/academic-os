@@ -7,6 +7,7 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from .core import utcnow
+from .mail_triage import formal
 
 
 def text(value):
@@ -16,7 +17,7 @@ def text(value):
 def write_summary(core):
     health = core.health()
     items = core.list_items()
-    pending = [i for i in items if i["status"] not in {"completed", "submitted", "cancelled"}]
+    pending = [i for i in items if formal(i) and i["status"] not in {"completed", "submitted", "cancelled"}]
     pending.sort(key=lambda i: i.get("source_due_at") or "9999")
     lines = ["# Academic OS 2.0", "", f"更新时间：{utcnow()}",
              f"运行模式：{'影子模式（不写日历、不发通知）' if core.settings.mode == 'shadow' else '正式运行'}",

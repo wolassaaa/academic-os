@@ -4,15 +4,22 @@ from __future__ import annotations
 import json
 from datetime import date, datetime, time, timedelta
 from zoneinfo import ZoneInfo
+from .mail_triage import linked_items, review_counts, review_state
 
 
 def search_mail(core, *, limit=50, offset=0, q=None, account=None,
-                date_mode="all", start=None, end=None):
+                date_mode="all", start=None, end=None, review='all'):
     if not 1 <= limit <= 300 or offset < 0:
         raise ValueError("Mail pagination requires limit 1–300 and offset >= 0")
     if date_mode not in {"all", "today", "next7", "custom", "undated"}:
         raise ValueError("Unknown mail date filter")
     clauses, parameters = [], []
+    if review not in {'all', 'pending', 'ignored'}:
+        raise ValueError('Unknown mail review filter')
+    if review != 'all':
+        clauses.append("EXISTS (SELECT 1 FROM items i,json_each(i.document,'$.mail_keys') k "
+                       "WHERE k.value=mail.id AND mail_review_state(i.document)=?)")
+        parameters.append(review)
     if q:
         if len(q) > 500:
             raise ValueError("Search query is too long")
@@ -45,6 +52,7 @@ def search_mail(core, *, limit=50, offset=0, q=None, account=None,
         parameters.extend([lower, upper])
     where = " WHERE " + " AND ".join(clauses) if clauses else ""
     with core.db.connect() as db:
+        db.create_function('mail_review_state', 1, lambda value: review_state(json.loads(value)), deterministic=True)
         # The count, page and account choices share a single read snapshot.
         db.execute("BEGIN")
         total = db.execute("SELECT COUNT(*) FROM mail" + where, parameters).fetchone()[0]
@@ -52,6 +60,8 @@ def search_mail(core, *, limit=50, offset=0, q=None, account=None,
                           " ORDER BY julianday(received_at) DESC,id DESC LIMIT ? OFFSET ?",
                           [*parameters, limit, offset])
         items = [json.loads(row[0]) for row in rows]
+        for item in items:
+            item['review_counts'] = review_counts(linked_items(db, item['key']))
         accounts = [row[0] for row in db.execute("SELECT DISTINCT account FROM mail ORDER BY account")]
     return {"items": items, "total": total, "limit": limit, "offset": offset,
             "accounts": accounts, "timezone": core.settings.timezone}

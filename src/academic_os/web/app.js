@@ -67,8 +67,10 @@ async function refresh(silent = false, force = false) {
     let data={dashboard};
     if(!state.session.remote) {
       const endpoints=['items','drafts','notifications','artifacts','jobs','config','conflicts','calendar-events','connections'];
-      const values=await Promise.all(endpoints.map(x=>api('/'+x)));
+      const values=await Promise.all(endpoints.map(x=>api('/'+x+(x==='items'?'?view=formal':''))));
       endpoints.forEach((key,index)=>data[key]=values[index]);
+      const missing=[...new Set(data.conflicts.map(c=>c.item_id))].filter(id=>!data.items.some(i=>i.id===id));
+      data.conflictItems=await Promise.all(missing.map(id=>api('/items/'+encodeURIComponent(id))));
     }
     state.data=data; state.offline=false; state.lastUpdated=new Date();
     if(force || (!dialog.open && !['INPUT','SELECT','TEXTAREA'].includes(document.activeElement?.tagName))) renderPage();
@@ -154,7 +156,7 @@ function renderItems() {
   const container=document.getElementById('item-table');if(!container)return;
   const items=state.data.items.filter(i=>(state.status==='all'||state.status==='active'&&!closedStatuses.has(i.status)||i.status===state.status)&&(!state.filter||`${i.title} ${i.course}`.toLocaleLowerCase().includes(state.filter.toLocaleLowerCase())));
   if(!items.length){container.replaceChildren(empty(state.filter?'没有匹配的事项':'暂无事项','你可以新建事项，或在“来源与日历”中请求同步。'));return;}
-  const table=el('table',{},el('thead',{},el('tr',{},['事项 / 课程','来源截止','学习安排','用时 / 优先级','状态','操作'].map(t=>el('th',{scope:'col'},t)))),el('tbody',{},items.map(i=>el('tr',{},el('td',{class:'title-cell'},btn(i.title,()=>editItem(i.id),'text-button'),el('div',{class:'row-meta'},i.course||label(i.kind),' · ',badge(label(i.review_state),i.review_state==='ready'?'neutral':'warn'))),el('td',{},i.source_due_at?time(i.source_due_at):'待公布'),el('td',{},i.scheduled_start?time(i.scheduled_start):'尚未安排',i.calendar_deleted?el('div',{class:'row-meta'},'日历中已删除'):null),el('td',{},i.estimate_minutes?`${i.estimate_minutes} 分钟`:'待估计',el('div',{class:'row-meta'},'优先级 '+i.priority+' / 5')),el('td',{},badge(label(i.status),closedStatuses.has(i.status)?'neutral':'')),el('td',{},el('div',{class:'actions'},btn('编辑',()=>editItem(i.id),'small',state.offline),btn('安排',()=>scheduleItem(i.id),'small',state.offline||closedStatuses.has(i.status))))))));
+  const table=el('table',{},el('thead',{},el('tr',{},['事项 / 课程','来源截止','学习安排','用时 / 优先级','状态','操作'].map(t=>el('th',{scope:'col'},t)))),el('tbody',{},items.map(i=>el('tr',{},el('td',{class:'title-cell'},btn(i.title,()=>editItem(i.id),'text-button'),el('div',{class:'row-meta'},i.course||label(i.kind),' · ',badge(label(i.review_state),i.review_state==='ready'?'neutral':'warn'),isMailTodo(i)?badge('邮件待办'):null)),el('td',{},i.source_due_at?time(i.source_due_at):'待公布'),el('td',{},i.scheduled_start?time(i.scheduled_start):'尚未安排',i.calendar_deleted?el('div',{class:'row-meta'},'日历中已删除'):null),el('td',{},i.estimate_minutes?`${i.estimate_minutes} 分钟`:'待估计',el('div',{class:'row-meta'},'优先级 '+i.priority+' / 5')),el('td',{},badge(label(i.status),closedStatuses.has(i.status)?'neutral':'')),el('td',{},el('div',{class:'actions'},...mailLinks(i),btn('编辑',()=>editItem(i.id),'small',state.offline),btn('安排',()=>scheduleItem(i.id),'small',state.offline||closedStatuses.has(i.status))))))));
   container.replaceChildren(el('div',{class:'table-wrap'},table));
 }
 function editItem(id) {
@@ -184,7 +186,7 @@ function scheduleItem(id) {
   form.addEventListener('submit',async e=>{e.preventDefault();const button=form.querySelector('[type=submit]');button.disabled=true;try{const a=isoInput(start.input.value),b=isoInput(end.input.value);if(b<=a)throw new Error('结束时间必须晚于开始时间。');await mutate('/drafts','POST',{changes:[{item_id:id,expected_version:item.version,start:a,end:b}]},true,'安排草稿已创建，请核对后确认');dialog.close();navigate('plans');}catch(error){formError(form,error);}finally{button.disabled=false;}});
   openDialog('调整学习安排',form);
 }
-const defaultMailFilters=()=>({q:'',account:'',date_mode:'all',start:'',end:'',offset:0,limit:50});
+const defaultMailFilters=()=>({q:'',account:'',review:'all',date_mode:'all',start:'',end:'',offset:0,limit:50});
 function mailStorageKey() { return 'academic-os:mail-filters:'+state.session.username; }
 function readMailFilters() {
   const filters=defaultMailFilters();
@@ -192,6 +194,7 @@ function readMailFilters() {
     const saved=JSON.parse(sessionStorage.getItem(mailStorageKey())||'{}');
     for(const key of ['q','account','start','end']) if(typeof saved[key]==='string')filters[key]=saved[key];
     if(['all','today','next7','custom','undated'].includes(saved.date_mode))filters.date_mode=saved.date_mode;
+    if(['all','pending','ignored'].includes(saved.review))filters.review=saved.review;
     if(Number.isSafeInteger(saved.offset)&&saved.offset>=0)filters.offset=saved.offset;
   } catch { /* Storage may be disabled; in-memory filters still work. */ }
   return filters;
@@ -204,6 +207,7 @@ function mailPage() {
   const root=el('div',{class:'stack'}),form=el('form',{class:'panel mail-filters'});
   const search=inputField('搜索全部邮件','search',f.q,{'aria-label':'搜索邮件',placeholder:'主题、发件人或正文关键词',maxlength:500});
   const account=selectField('账号',[['','全部账号']],f.account,{'aria-label':'邮件账号',id:'mail-account'});
+  const review=selectField('候选核对',[['all','全部'],['pending','待核对'],['ignored','已忽略']],f.review,{'aria-label':'邮件核对状态'});
   const modes=[['all','全部日期'],['today','今天'],['next7','未来七天'],['custom','自定义范围'],['undated','无日期']];
   const mode=selectField('收件日期',modes,f.date_mode,{'aria-label':'邮件收件日期'});
   const start=inputField('开始日期','date',f.start,{'aria-label':'邮件开始日期'});
@@ -211,12 +215,12 @@ function mailPage() {
   const dates=el('div',{class:'field-grid',hidden:f.date_mode!=='custom'},start.node,end.node);
   const toggleDates=()=>{dates.hidden=mode.input.value!=='custom';start.input.required=end.input.required=!dates.hidden;};
   mode.input.addEventListener('change',toggleDates);toggleDates();
-  form.append(el('div',{class:'field-grid'},search.node,account.node,mode.node),dates,el('div',{class:'form-actions'},el('button',{type:'submit',class:'primary'},'查询邮件'),btn('清空筛选',()=>{state.mailFilters=defaultMailFilters();saveMailFilters();state.mailPageData=null;renderPage();})),el('p',{class:'subtitle'},'查询全部已采集邮件 · 按工作台时区筛选收件日期 · 正文按需加载'));
+  form.append(el('div',{class:'field-grid'},search.node,account.node,review.node,mode.node),dates,el('div',{class:'form-actions'},el('button',{type:'submit',class:'primary'},'查询邮件'),btn('清空筛选',()=>{state.mailFilters=defaultMailFilters();saveMailFilters();state.mailPageData=null;renderPage();})),el('p',{class:'subtitle'},'未确认候选不产生截止提醒 · 新邮件到达通知保留 · 正文按需加载'));
   form.addEventListener('submit',event=>{
     event.preventDefault();
     if(mode.input.value==='custom'&&end.input.value<start.input.value){formError(form,new Error('结束日期必须不早于开始日期。'));return;}
     form.querySelector('.dialog-error')?.remove();
-    state.mailFilters={q:search.input.value.trim(),account:account.input.value,date_mode:mode.input.value,start:start.input.value,end:end.input.value,offset:0,limit:50};
+    state.mailFilters={q:search.input.value.trim(),account:account.input.value,review:review.input.value,date_mode:mode.input.value,start:start.input.value,end:end.input.value,offset:0,limit:50};
     saveMailFilters();state.mailPageData=null;loadMail();
   });
   root.append(form,el('section',{id:'mail-results','aria-live':'polite','aria-label':'邮件查询结果'}));
@@ -249,23 +253,64 @@ function renderMailResults() {
   const f=state.mailFilters,account=document.getElementById('mail-account');
   if(account){const value=account.value||f.account,accounts=[...new Set([...data.accounts,...(value?[value]:[])])];account.replaceChildren(el('option',{value:'',selected:!value},'全部账号'),...accounts.map(id=>el('option',{value:id,selected:id===value},id)));}
   const modes={all:'全部日期',today:'今天',next7:'未来七天',custom:f.start+' 至 '+f.end,undated:'无日期'};
-  const summary=[f.account||'全部账号',modes[f.date_mode],...(f.q?['关键词：'+f.q]:[])].join(' · ');
+  const summary=[f.account||'全部账号',{all:'全部候选',pending:'待核对',ignored:'已忽略'}[f.review],modes[f.date_mode],...(f.q?['关键词：'+f.q]:[])].join(' · ');
   const changePage=offset=>{f.offset=offset;saveMailFilters();loadMail();};
-  root.replaceChildren(el('div',{class:'filterbar'},el('div',{},el('strong',{},`共 ${data.total} 封 · ${data.total?data.offset+1:0}–${Math.min(data.offset+data.limit,data.total)}`),el('p',{class:'subtitle'},summary+' · '+data.timezone)),el('div',{class:'actions'},btn('上一页',()=>changePage(Math.max(0,f.offset-f.limit)),'small',f.offset===0),btn('下一页',()=>changePage(f.offset+f.limit),'small',f.offset+f.limit>=data.total))),el('div',{class:'mail-layout'},data.items.length?data.items.map(m=>el('article',{class:'mail-card'},el('div',{class:'mail-head'},el('div',{},btn(m.subject||'(无主题)',()=>openMail(m),'text-button'),el('div',{class:'row-meta'},m.from+' · '+m.account+' · '+(m.received_at?time(m.received_at):'无收件日期'))),badge('✉ 邮件','neutral')),el('div',{class:'actions section-gap'},btn('查看原文与日期',()=>openMail(m),'small'),badge((m.date_nodes?.length||0)+' 个日期节点','neutral')))):empty('没有匹配的邮件','调整筛选条件或清空筛选；查询覆盖全部已采集邮件。')));
+  root.replaceChildren(el('div',{class:'filterbar'},el('div',{},el('strong',{},`共 ${data.total} 封 · ${data.total?data.offset+1:0}–${Math.min(data.offset+data.limit,data.total)}`),el('p',{class:'subtitle'},summary+' · '+data.timezone)),el('div',{class:'actions'},btn('上一页',()=>changePage(Math.max(0,f.offset-f.limit)),'small',f.offset===0),btn('下一页',()=>changePage(f.offset+f.limit),'small',f.offset+f.limit>=data.total))),el('div',{class:'mail-layout'},data.items.length?data.items.map(m=>el('article',{class:'mail-card'},el('div',{class:'mail-head'},el('div',{},btn(m.subject||'(无主题)',()=>openMail(m),'text-button'),el('div',{class:'row-meta'},m.from+' · '+m.account+' · '+(m.received_at?time(m.received_at):'无收件日期'))),badge('✉ 邮件','neutral')),el('div',{class:'actions section-gap'},btn('查看原文与日期',()=>openMail(m),'small'),badge((m.date_nodes?.length||0)+' 个日期节点','neutral'),...Object.entries(m.review_counts||{}).filter(([,n])=>n>0).map(([key,n])=>badge({pending:'待核对',confirmed:'邮件待办',ignored:'已忽略'}[key]+' '+n+' 项',key==='pending'?'warn':'neutral'))))):empty('没有匹配的邮件','调整筛选条件或清空筛选；查询覆盖全部已采集邮件。')));
+}
+function isMailTodo(item) {
+  return !item.manual_origin&&item.mail_review?.state==='confirmed'&&item.evidence?.length&&item.evidence.every(e=>e.source.startsWith('gmail:'));
+}
+function mailLinks(item) {
+  return (item.mail_keys||[]).map((key,index)=>btn(index?'查看关联邮件 '+(index+1):'查看关联邮件',()=>openMail({key,subject:item.title}),'small',state.offline));
 }
 async function openMail(mail) {
   const content=el('div',{},empty('正在加载邮件原文…','正文按需读取，不包含在定期刷新中。'));
   openDialog(mail.subject||'(无主题)',content);
   const request=Symbol();state.mailRequest=request;
-  try {
-    if(state.offline)throw new Error('当前离线，无法加载邮件正文。恢复连接后请重试。');
-    const detail=await api('/mail/'+encodeURIComponent(mail.key));
-    if(state.mailRequest!==request||!dialog.open||!content.isConnected)return;
-    content.replaceChildren(el('p',{class:'subtitle'},detail.from+' · '+detail.account+' · '+time(detail.received_at)),el('div',{class:'banner warn section-gap'},'规则提取可能存在日期歧义。模型分析未启用，请结合原文核对。'),el('div',{class:'mail-body'},detail.body||'（邮件没有正文）'),el('h3',{class:'section-gap'},'提取的日期节点'),detail.date_nodes?.length?el('pre',{class:'code'},JSON.stringify(detail.date_nodes,null,2)):empty('未提取到明确日期','可在事项中手动填写经核对的截止时间。'));
-  } catch(error) {
-    if(state.mailRequest!==request||!dialog.open||!content.isConnected)return;
-    content.replaceChildren(el('div',{class:'dialog-error',role:'alert'},error.message),el('div',{class:'form-actions'},btn('重试加载原文',()=>openMail(mail),'primary')));
-  }
+  const current=()=>state.mailRequest===request&&dialog.open&&content.isConnected;
+  const load=async()=>{
+    try {
+      if(state.offline)throw new Error('当前离线，请刷新连接后重试。');
+      const detail=await api('/mail/'+encodeURIComponent(mail.key));
+      if(!current())return;
+      content.replaceChildren(el('p',{class:'subtitle'},detail.from+' · '+detail.account+' · '+time(detail.received_at)),el('div',{class:'banner warn section-gap'},'逐条核对日期证据。未知截止时间请留空；确认前不产生截止提醒。模型分析未启用。'),el('div',{class:'mail-body'},detail.body||'（邮件没有正文）'),el('h3',{class:'section-gap'},'关联候选与邮件待办'),el('div',{class:'stack section-gap'},detail.linked_items?.length?detail.linked_items.map(item=>candidateCard(item,load,current)):empty('没有关联候选','原邮件保留；未提取到明确事项时，不补造任务或截止时刻。')),el('details',{class:'section-gap'},el('summary',{},el('h3',{},'提取的日期节点')),detail.date_nodes?.length?el('pre',{class:'code'},JSON.stringify(detail.date_nodes,null,2)):empty('未提取到明确日期','未知截止时间可以留空。')));
+    } catch(error) {
+      if(!current())return;
+      content.replaceChildren(el('div',{class:'dialog-error',role:'alert'},error.message),el('div',{class:'form-actions'},btn('重试加载原文',load,'primary')));
+    }
+  };
+  await load();
+}
+function candidateCard(item,reload,current) {
+  const pure=!item.manual_origin&&item.evidence?.every(e=>e.source.startsWith('gmail:'));
+  const status=pure?item.mail_review?.state||'confirmed':'confirmed';
+  const card=el('form',{class:'mail-candidate'},el('div',{class:'actions'},el('strong',{},item.title),badge({pending:'待核对',confirmed:pure?'邮件待办':'正式事项',ignored:'已忽略'}[status],status==='pending'?'warn':'neutral')),el('p',{class:'subtitle'},'事项版本 '+item.version+' · 核对版本 '+(item.mail_review?.revision||0)),el('details',{open:true},el('summary',{},'日期与来源证据'),el('pre',{class:'code'},JSON.stringify(item.evidence,null,2))));
+  const actions=el('div',{class:'form-actions'});
+  let title,due,estimate,priority;
+  if(status==='pending') {
+    title=inputField('候选标题','text',item.title,{required:true,maxlength:500});
+    due=inputField('核对截止时间 · 浏览器本地时区（未知留空）','datetime-local',localInput(item.source_due_at));
+    estimate=inputField('预计用时（分钟）','number',item.estimate_minutes,{min:1,max:10080,step:1});
+    priority=selectField('优先级（5 最高）',[0,1,2,3,4,5].map(v=>[String(v),String(v)]),String(item.priority));
+    card.append(el('div',{class:'field-grid section-gap'},title.node,due.node,estimate.node,priority.node));
+    actions.append(el('button',{type:'submit',class:'primary',disabled:state.offline},'确认成待办'),btn('忽略候选',()=>save('ignore'),'small',state.offline));
+  } else if(status==='ignored') actions.append(btn('恢复待核对',()=>save('restore'),'primary',state.offline));
+  else actions.append(el('p',{class:'subtitle'},'截止：'+(item.source_due_at?time(item.source_due_at):'未知，未设置截止提醒')),btn('查看正式事项',()=>{dialog.close();navigate('items');editItem(item.id);},'primary',state.offline));
+  card.append(actions);
+  let busy=false;
+  const save=async(action)=>{
+    if(busy||!current())return;
+    busy=true;card.querySelectorAll('button').forEach(b=>b.disabled=true);
+    try {
+      const changes=action==='confirm'?{title:title.input.value.trim(),source_due_at:due.input.value===localInput(item.source_due_at)?item.source_due_at:isoInput(due.input.value),estimate_minutes:estimate.input.value?Number(estimate.input.value):null,priority:Number(priority.input.value)}:{};
+      await mutate('/items/'+encodeURIComponent(item.id)+'/mail-review','POST',{action,expected_version:item.version,changes},true,{confirm:'已确认为邮件待办',ignore:'候选已忽略，原邮件保留',restore:'已恢复待核对'}[action]);
+      if(current())await reload();
+    } catch(error) {
+      if(current()) {formError(card,error);if(!card.querySelector('.review-reload'))card.append(btn('刷新核对内容',reload,'review-reload small section-gap'));}
+    } finally {busy=false;card.querySelectorAll('button').forEach(b=>b.disabled=state.offline);}
+  };
+  card.addEventListener('submit',event=>{event.preventDefault();save('confirm');});
+  return card;
 }
 function plansPage() {
   const root=el('div'),days=el('select',{'aria-label':'计划范围'},[3,7,14,30].map(n=>el('option',{value:n,selected:n===7},'未来 '+n+' 天')));
@@ -328,7 +373,7 @@ function conflictPanel() {
   const body=el('div',{class:'panel-body'});
   if(!conflicts.length)body.append(empty('没有待处理冲突','来源日期或日历编辑发生冲突时，在这里逐项核对。'));
   for(const c of conflicts) {
-    const item=state.data.items.find(i=>i.id===c.item_id);
+    const item=[...state.data.items,...(state.data.conflictItems||[])].find(i=>i.id===c.item_id);
     body.append(el('div',{class:'row'},el('div',{class:'row-main'},el('div',{class:'row-title'},itemTitle(c.item_id)+' · '+label(c.kind)),el('details',{},el('summary',{},'核对冲突内容'),el('pre',{class:'code'},JSON.stringify(c.document,null,2))),el('div',{class:'actions'},btn('保留本地',()=>resolveConflict(c,item,'local'),'small',state.offline||!item),btn('采用来源 / 远端',()=>resolveConflict(c,item,'remote'),'small',state.offline||!item)))));
   }
   return panel('待处理冲突','确认保留哪一份事实；使用当前事项版本避免覆盖新改动',body);

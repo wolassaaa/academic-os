@@ -151,6 +151,9 @@ class CalendarSync:
 
     def push(self, item_id, expected_version=None):
         item = self.core.get_item(item_id)
+        from .mail_triage import formal
+        if not formal(item):
+            return {'skipped': 'mail_candidate_requires_review'}
         if self.core.settings.mode == "shadow":
             return {"shadow": True, "item_id": item_id}
         if item["calendar_deleted"] or item["review_state"] == "conflict":

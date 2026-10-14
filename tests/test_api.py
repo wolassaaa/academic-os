@@ -55,7 +55,7 @@ def test_browser_mutation_requires_csrf_and_login_rate_limits(tmp_path):
 
 def test_no_secret_or_mail_body_in_remote_dashboard(tmp_path):
     core, _, remote, _ = clients(tmp_path)
-    item = core.ingest("gmail:x", [{"source_id": "x", "title": "Private task", "evidence_text": "SECRET_BODY"}])[0]
+    item = core.ingest("gmail:x", [{"source_id": "x", "title": "Private task", "review_state": "ready", "evidence_text": "SECRET_BODY"}])[0]
     remote.post("/api/v1/login", json={"username": "owner", "password": "a-strong-password-123"})
     result = remote.get("/api/v1/dashboard")
     assert "SECRET_BODY" not in result.text
