@@ -12,3 +12,5 @@
 .mail-candidate{padding:18px;border:1px solid var(--line);border-radius:10px;min-width:0;overflow-wrap:anywhere}.mail-candidate .code{max-height:200px;overflow:auto}.mail-candidate input{min-width:0;width:100%}.mail-candidate .form-actions{flex-wrap:wrap}
 
 .tag-filter{margin-bottom:14px}.tag-filter select{display:block;width:100%;max-width:600px;margin:10px 0}.tag-choices{display:grid;gap:12px;max-height:50vh;overflow:auto}.tag-choice{display:flex;gap:10px;align-items:center;min-height:36px;overflow-wrap:anywhere}.tag-choice input{width:18px;height:18px;flex-shrink:0}.mail-candidate .mail-body{max-height:400px;overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere}
+
+.classification-filters{margin-bottom:16px}.classification-filters .field{min-width:0}

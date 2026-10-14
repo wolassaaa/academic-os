@@ -22,7 +22,7 @@ def test_scoped_tags_assign_rename_archive_and_sync_preserves(tmp_path):
     with pytest.raises(Conflict, match='item_version_changed'):
         tags.assign(item['id'], [], item['version'], 'stale')
     synced = core.ingest('moodle', [{'source_id': '1', 'title': 'Lab updated', 'due_at': '2027-01-01T00:00:00Z'}])[0]
-    assert {t['id'] for t in core.get_item(synced['id'])['tags']} == {course['id'], group['id'], assignment['id']}
+    assert {t['id'] for t in core.get_item(synced['id'])['tags'] if t['origin'] == 'manual'} == {course['id'], group['id'], assignment['id']}
     renamed = tags.update(group['id'], {'name': 'Team A'}, group['version'])
     assert core.get_item(item['id'])['tags'][1:]  # Definitions are read live, not duplicated in item JSON.
     with pytest.raises(Conflict):

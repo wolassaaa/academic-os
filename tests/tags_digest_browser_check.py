@@ -36,6 +36,7 @@ def main():
                 page.get_by_role('button', name='登录工作台', exact=True).click()
                 page.get_by_text('高级核对工具', exact=True).click()
                 page.get_by_role('button', name='标签管理', exact=False).click()
+                page.get_by_text('高级：补充人工标签', exact=True).click()
                 page.get_by_label('标签名称', exact=True).fill('COMP1000')
                 page.get_by_label('标签类型', exact=True).select_option('course')
                 page.get_by_label('所属范围', exact=True).fill('2026秋')
@@ -53,10 +54,10 @@ def main():
                 dialog.get_by_role('checkbox', name='小组 / Group A · COMP1000 / 2026秋', exact=True).check()
                 dialog.get_by_role('button', name='保存标签', exact=True).click()
                 expect(dialog).not_to_be_visible()
-                assert len(core.get_item(item['id'])['tags']) == 2
+                assert len([t for t in core.get_item(item['id'])['tags'] if t['origin'] == 'manual']) == 2
                 expect(page.locator('#item-table').get_by_text('COMP1000', exact=True)).to_be_visible()
                 page.get_by_text('标签组合筛选（同时包含）', exact=True).click()
-                page.get_by_label('标签组合筛选', exact=True).select_option([t['id'] for t in core.get_item(item['id'])['tags']])
+                page.get_by_label('标签组合筛选', exact=True).select_option([t['id'] for t in core.get_item(item['id'])['tags'] if t['origin'] == 'manual'])
                 expect(page.get_by_role('button', name='课程作业', exact=True)).to_be_visible()
                 page.get_by_role('button', name='标签管理', exact=False).click()
                 page.locator('.row').filter(has_text='Group A').get_by_role('button', name='重命名', exact=True).click()

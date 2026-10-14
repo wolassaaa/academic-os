@@ -46,5 +46,6 @@ jobs:
           python tests/mail_browser_check.py "${{ runner.temp }}/mail-screenshots"
           python tests/triage_browser_check.py "${{ runner.temp }}/triage-screenshots"
           python tests/tags_digest_browser_check.py "${{ runner.temp }}/tags-screenshots"
+          python tests/classification_browser_check.py "${{ runner.temp }}/classification-screenshots"
       - name: Build source wheel
         run: python -m pip wheel --no-deps --no-build-isolation --wheel-dir dist .
