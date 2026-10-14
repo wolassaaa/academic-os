@@ -44,5 +44,6 @@ jobs:
           python -m playwright install chromium
           python tests/browser_check.py
           python tests/mail_browser_check.py "${{ runner.temp }}/mail-screenshots"
+          python tests/triage_browser_check.py "${{ runner.temp }}/triage-screenshots"
       - name: Build source wheel
         run: python -m pip wheel --no-deps --no-build-isolation --wheel-dir dist .

@@ -5,8 +5,9 @@ import json
 import time
 from datetime import datetime, timezone
 
-from .core import identifier, utcnow
+from .core import Conflict, identifier, utcnow
 from .db import dumps
+from .mail_triage import formal, review_revision
 
 
 class Notifications:
@@ -19,7 +20,7 @@ class Notifications:
         with self.core.db.transaction() as db:
             if item_id and "source_due_at" in document:
                 current = self.core._get(db, item_id)
-                if current["source_due_at"] != document["source_due_at"] or current.get("deadline_revision", 1) != document.get("deadline_revision", 1) or current["status"] in {"completed", "submitted", "cancelled"}:
+                if not formal(current) or review_revision(current) != document.get('mail_review_revision', 0) or current["source_due_at"] != document["source_due_at"] or current.get("deadline_revision", 1) != document.get("deadline_revision", 1) or current["status"] in {"completed", "submitted", "cancelled"}:
                     return None
             previous = db.execute("SELECT id FROM notifications WHERE unique_key=?", (key,)).fetchone()
             if previous:
@@ -43,7 +44,7 @@ class Notifications:
             if row["item_id"]:
                 item = self.core._get(db, row["item_id"])
                 document = json.loads(row["document"])
-                if "source_due_at" in document and (item["source_due_at"] != document["source_due_at"] or item.get("deadline_revision", 1) != document.get("deadline_revision", 1)):
+                if "source_due_at" in document and (not formal(item) or review_revision(item) != document.get('mail_review_revision', 0) or item["source_due_at"] != document["source_due_at"] or item.get("deadline_revision", 1) != document.get("deadline_revision", 1)):
                     db.execute("UPDATE notifications SET state='superseded' WHERE id=?", (row["id"],))
                     return row["id"]
                 if item["status"] in {"completed", "submitted", "cancelled"}:
@@ -86,6 +87,8 @@ class Notifications:
             row = db.execute("SELECT * FROM notifications WHERE id=?", (notification_id,)).fetchone()
             if not row:
                 raise KeyError(notification_id)
+            if row['item_id'] and action in {'snooze', 'complete'} and not formal(self.core._get(db, row['item_id'])):
+                raise Conflict('mail_candidate_requires_review')
             # A user action wins over an in-flight network delivery update.
             db.execute("UPDATE notifications SET state=?,due_at=?,lease_token=NULL,lease_until=NULL WHERE id=?", (states[action], time.time() + minutes * 60, notification_id))
             group = json.loads(row["document"]).get("group_key")
@@ -105,7 +108,7 @@ class Notifications:
         levels = [(168, "7d"), (120, "5d"), (72, "3d"), (24, "1d"), (3, "3h"), (0, "due")]
         count = 0
         for item in self.core.list_items():
-            if item["status"] in {"completed", "submitted", "cancelled"} or not item["source_due_at"]:
+            if not formal(item) or item["status"] in {"completed", "submitted", "cancelled"} or not item["source_due_at"]:
                 continue
             hours = (datetime.fromisoformat(item["source_due_at"]) - now).total_seconds() / 3600
             if hours > 168:
@@ -115,8 +118,11 @@ class Notifications:
                 continue
             level = hit[-1] if hours >= 0 else "overdue:" + now.date().isoformat()
             revision = item.get("deadline_revision", 1)
-            key = hashlib.sha256(f"{item['id']}:{item['source_due_at']}:{revision}:{level}".encode()).hexdigest()
+            mail_revision = review_revision(item)
+            suffix = f':mail:{mail_revision}' if mail_revision else ''
+            key = hashlib.sha256(f"{item['id']}:{item['source_due_at']}:{revision}:{level}{suffix}".encode()).hexdigest()
             document = {"title": "学业提醒 · " + item["title"], "body": f"截止：{item['source_due_at']}\n状态：{item['status']}\n剩余：{hours:.1f} 小时\n请在工作台确认收到、稍后提醒或完成。", "level": level, "group_key": key, "source_due_at": item["source_due_at"], "deadline_revision": revision}
+            document['mail_review_revision'] = mail_revision
             self.queue("workbench", document, "workbench:" + key, item["id"])
             if self.core.settings.feishu.get("chat_id"):
                 self.queue("feishu", document, "feishu:" + key, item["id"])

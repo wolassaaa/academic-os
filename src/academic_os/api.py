@@ -56,6 +56,12 @@ class Plan(Payload):
     days: int = Field(default=7, ge=1, le=30)
 
 
+class MailReview(Payload):
+    action: Literal['confirm', 'ignore', 'restore']
+    expected_version: int = Field(ge=1)
+    changes: dict = Field(default_factory=dict)
+
+
 def create_app(core, remote=False, config_path=None, connections=None):
     app = FastAPI(title="Academic OS Remote Dashboard" if remote else "Academic OS 2.0 API", version="2.0.0", docs_url=None if remote else "/docs", redoc_url=None, openapi_url=None if remote else "/openapi.json")
     auth = Auth(core.db, core.settings)
@@ -142,14 +148,17 @@ def create_app(core, remote=False, config_path=None, connections=None):
     @app.get("/api/v1/dashboard")
     def dashboard(request: Request):
         principal(request)
-        items = core.list_items()
+        all_items = core.list_items()
+        from .mail_triage import review_state
+        pending_mail = sum(review_state(item) == 'pending' for item in all_items)
+        items = core.list_items(view='formal')
         visible = [{k: item[k] for k in ("id", "title", "course", "kind", "status", "source_due_at", "scheduled_start", "scheduled_end", "review_state", "priority", "version")} for item in items]
         notices = [{k: n[k] for k in ("id", "channel", "state", "attempts", "created_at", "last_error")} for n in notifications.list()]
         with core.db.connect() as db:
             mail_count = db.execute("SELECT COUNT(*) FROM mail").fetchone()[0]
         return {"health": core.health(), "items": visible, "calendars": core.list_calendars(), "notifications": notices,
                 "conflicts": [{k: c[k] for k in ("id", "kind", "item_id", "state", "created_at")} for c in core.list_conflicts()],
-                "counts": {"active": sum(i["status"] not in {"completed", "submitted", "cancelled"} for i in items), "mail": mail_count, "review": sum(i["review_state"] != "ready" for i in items), "failed": sum(n["state"] == "failed" for n in notices)}, "remote": remote}
+                "counts": {"active": sum(i["status"] not in {"completed", "submitted", "cancelled"} for i in items), "mail": mail_count, "mail_pending": pending_mail, "review": sum(i["review_state"] != "ready" for i in items), "failed": sum(n["state"] == "failed" for n in notices)}, "remote": remote}
 
     if remote:
         return app
@@ -308,9 +317,14 @@ def create_app(core, remote=False, config_path=None, connections=None):
         return core.health()
 
     @app.get("/api/v1/items")
-    def items(request: Request):
+    def items(request: Request, view: str = 'all'):
         principal(request)
-        return core.list_items()
+        return core.list_items(view=view)
+
+    @app.post('/api/v1/items/{item_id}/mail-review')
+    def mail_review(item_id: str, payload: MailReview, request: Request, idempotency_key: str | None = Header(default=None)):
+        actor = principal(request, 'confirm')
+        return core.review_mail_item(item_id, payload.action, payload.expected_version, key(idempotency_key), payload.changes, actor)
 
     @app.get("/api/v1/items/{item_id}")
     def item(item_id: str, request: Request):
@@ -339,11 +353,11 @@ def create_app(core, remote=False, config_path=None, connections=None):
     @app.get("/api/v1/mail/search")
     def mail_search(request: Request, limit: int = 50, offset: int = 0, q: str | None = None,
                     account: str | None = None, date_mode: str = "all",
-                    start: str | None = None, end: str | None = None):
+                    start: str | None = None, end: str | None = None, review: str = 'all'):
         principal(request)
         from .mail_query import search_mail
         return search_mail(core, limit=limit, offset=offset, q=q, account=account,
-                           date_mode=date_mode, start=start, end=end)
+                           date_mode=date_mode, start=start, end=end, review=review)
 
     @app.get("/api/v1/mail/{mail_key}")
     def mail_detail(mail_key: str, request: Request):

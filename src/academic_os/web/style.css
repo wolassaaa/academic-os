@@ -8,3 +8,5 @@
 @media(prefers-reduced-motion:reduce){*{transition:none!important;scroll-behavior:auto!important}}
 
 .mail-filters{padding:22px}.mail-filters [hidden]{display:none}.mail-filters .field-grid{margin-bottom:14px}.mail-card{overflow-wrap:anywhere}.mail-filters .subtitle{margin-bottom:0}@media(max-width:720px){.mail-filters{padding:17px}}
+
+.mail-candidate{padding:18px;border:1px solid var(--line);border-radius:10px;min-width:0;overflow-wrap:anywhere}.mail-candidate .code{max-height:200px;overflow:auto}.mail-candidate input{min-width:0;width:100%}.mail-candidate .form-actions{flex-wrap:wrap}

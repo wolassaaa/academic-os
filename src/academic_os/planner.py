@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
+from .mail_triage import formal
 
 
 def parsed(value):
@@ -19,7 +20,7 @@ def generate_plan(items, busy, settings, now=None, days=7):
     local_now = now.astimezone(tz)
     occupied = [(parsed(b["start"]), parsed(b["end"])) for b in busy]
     occupied.extend((parsed(i["scheduled_start"]), parsed(i["scheduled_end"])) for i in items if i.get("scheduled_start") and i.get("scheduled_end") and i["status"] != "cancelled")
-    candidates = [i for i in items if i["status"] in {"pending", "in_progress", "unknown"} and not i.get("scheduled_start") and not i.get("calendar_deleted")]
+    candidates = [i for i in items if formal(i) and i["status"] in {"pending", "in_progress", "unknown"} and not i.get("scheduled_start") and not i.get("calendar_deleted")]
     candidates.sort(key=lambda i: (-i["priority"], i.get("source_due_at") or "9999", -(i.get("weight_pct") or 0), i["id"]))
     changes, unplaced = [], []
     for item in candidates:

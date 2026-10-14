@@ -10,6 +10,39 @@ import threading
 import time
 
 
+def diagnose_mail_triage(directory):
+    from datetime import datetime, timedelta, timezone
+    from .config import Settings
+    from .core import Core
+    from .db import Database, dumps
+    from .mail_query import search_mail
+    from .notifications import Notifications
+
+    settings = Settings(data_dir=Path(directory))
+    core = Core(Database(settings.database_path), settings)
+    due = (datetime.now(timezone.utc) + timedelta(hours=2)).isoformat()
+    with core.db.transaction() as db:
+        db.execute('INSERT INTO mail VALUES(?,?,?,?)', ('diagnostic:m1', 'diagnostic', dumps(
+            {'id': 'm1', 'key': 'diagnostic:m1', 'account': 'diagnostic', 'body': 'offline original', 'subject': 'Diagnostic', 'date_nodes': []}), due))
+    first, second = core.ingest('gmail:diagnostic', [
+        {'source_id': 'm1:deadline', 'title': 'Dated candidate', 'due_at': due, 'review_state': 'needs_analysis'},
+        {'source_id': 'm1:unknown', 'title': 'Undated candidate', 'review_state': 'needs_analysis'}])
+    assert not core.list_items(view='formal')
+    notices = Notifications(core)
+    assert notices.generate()['considered'] == 0 and not notices.list()
+    assert search_mail(core, review='pending')['total'] == 1
+    confirmed = core.review_mail_item(first['id'], 'confirm', first['version'], 'confirm-offline')
+    assert confirmed == core.review_mail_item(first['id'], 'confirm', first['version'], 'confirm-offline')
+    assert notices.generate()['considered'] == 1 and notices.list()
+    ignored = core.review_mail_item(second['id'], 'ignore', second['version'], 'ignore-offline')
+    restored = core.review_mail_item(second['id'], 'restore', ignored['version'], 'restore-offline')
+    assert restored['source_due_at'] is None
+    assert len(core.get_mail('diagnostic:m1')['linked_items']) == 2
+    assert core.get_mail('diagnostic:m1')['body'] == 'offline original'
+    assert len(Core(core.db, settings).list_items(view='formal')) == 1
+    return ['mail_triage_independent_candidates', 'mail_triage_confirm_idempotency', 'mail_triage_reminder_gate', 'mail_triage_ignore_restore_unknown_date', 'mail_triage_links_restart']
+
+
 def diagnose():
     import certifi
     import httpx
@@ -108,6 +141,7 @@ def diagnose():
                     raise RuntimeError("diagnostic_shutdown_failed")
             assert not failures, failures
         checks += ["http_start_stop_restart", "eight_character_login", "persistent_items", "remote_readonly_boundary", "markdown_export"]
+        checks += diagnose_mail_triage(Path(directory) / 'triage')
         # Exercise the packaged parser with the actual Windows trailing-slash shape.
         # The school API and credentials are isolated; no external login is used.
         import base64
