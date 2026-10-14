@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Literal
 from urllib.parse import urlparse
 
-from fastapi import Body, FastAPI, Header, HTTPException, Request, Response
+from fastapi import Body, FastAPI, Header, HTTPException, Query, Request, Response
 from fastapi.responses import FileResponse, JSONResponse, HTMLResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field
@@ -60,6 +60,23 @@ class MailReview(Payload):
     action: Literal['confirm', 'ignore', 'restore']
     expected_version: int = Field(ge=1)
     changes: dict = Field(default_factory=dict)
+
+
+class TagCreate(Payload):
+    name: str = Field(min_length=1, max_length=80)
+    kind: Literal['course', 'assignment', 'group', 'custom'] = 'custom'
+    scope: str = Field(default='', max_length=200)
+
+
+class ItemTags(Payload):
+    expected_version: int = Field(ge=1)
+    tag_ids: list[str] = Field(max_length=30)
+
+
+class FeedAck(Payload):
+    consumer: str = Field(min_length=1, max_length=80)
+    cursor: int = Field(ge=0)
+    expected_cursor: int = Field(ge=0)
 
 
 def create_app(core, remote=False, config_path=None, connections=None):
@@ -317,9 +334,34 @@ def create_app(core, remote=False, config_path=None, connections=None):
         return core.health()
 
     @app.get("/api/v1/items")
-    def items(request: Request, view: str = 'all'):
+    def items(request: Request, view: str = 'all', tag: list[str] = Query(default=[])):
         principal(request)
-        return core.list_items(view=view)
+        from .tags import Tags
+        return Tags.filter_items(core.list_items(view=view), tag)
+
+    @app.get('/api/v1/tags')
+    def tags(request: Request, include_archived: bool = False):
+        principal(request)
+        from .tags import Tags
+        return Tags(core).list(include_archived)
+
+    @app.post('/api/v1/tags')
+    def add_tag(payload: TagCreate, request: Request, idempotency_key: str | None = Header(default=None)):
+        actor = principal(request, 'draft')
+        from .tags import Tags
+        return Tags(core).create(payload.name, payload.kind, payload.scope, key(idempotency_key), actor)
+
+    @app.patch('/api/v1/tags/{tag_id}')
+    def update_tag(tag_id: str, payload: ItemUpdate, request: Request):
+        actor = principal(request, 'draft')
+        from .tags import Tags
+        return Tags(core).update(tag_id, payload.changes, payload.expected_version, actor)
+
+    @app.put('/api/v1/items/{item_id}/tags')
+    def assign_tags(item_id: str, payload: ItemTags, request: Request, idempotency_key: str | None = Header(default=None)):
+        actor = principal(request, 'draft')
+        from .tags import Tags
+        return Tags(core).assign(item_id, payload.tag_ids, payload.expected_version, key(idempotency_key), actor)
 
     @app.post('/api/v1/items/{item_id}/mail-review')
     def mail_review(item_id: str, payload: MailReview, request: Request, idempotency_key: str | None = Header(default=None)):
@@ -358,6 +400,25 @@ def create_app(core, remote=False, config_path=None, connections=None):
         from .mail_query import search_mail
         return search_mail(core, limit=limit, offset=offset, q=q, account=account,
                            date_mode=date_mode, start=start, end=end, review=review)
+
+    @app.get('/api/v1/mail/digest')
+    def mail_digest(request: Request, limit: int = 20, offset: int = 0, body_chars: int = 800,
+                    account: str | None = None, date_mode: str = 'all', start: str | None = None, end: str | None = None, review: str = 'all', q: str | None = None):
+        principal(request)
+        from .mail_digest import digest
+        return digest(core, limit=limit, offset=offset, body_chars=body_chars, account=account, date_mode=date_mode, start=start, end=end, review=review, q=q)
+
+    @app.get('/api/v1/mail/feed')
+    def mail_feed(request: Request, consumer: str = 'hermes', after: int | None = None, limit: int = 20, body_chars: int = 800):
+        principal(request)
+        from .mail_digest import feed
+        return feed(core, consumer=consumer, after=after, limit=limit, body_chars=body_chars)
+
+    @app.post('/api/v1/mail/feed/ack')
+    def mail_feed_ack(payload: FeedAck, request: Request):
+        actor = principal(request, 'sync')
+        from .mail_digest import acknowledge
+        return acknowledge(core, payload.consumer, payload.cursor, payload.expected_cursor, actor)
 
     @app.get("/api/v1/mail/{mail_key}")
     def mail_detail(mail_key: str, request: Request):

@@ -1,11 +1,11 @@
 'use strict';
 
-const state = {session: null, page: 'config', data: {}, offline: false, lastUpdated: null, loading: false, filter: '', status: 'active'};
+const state = {session: null, page: 'config', data: {}, offline: false, lastUpdated: null, loading: false, filter: '', status: 'active', tagFilter: []};
 const app = document.getElementById('app');
 const dialog = document.getElementById('dialog');
 const closedStatuses = new Set(['completed', 'submitted', 'cancelled']);
 const names = {pending:'待开始',in_progress:'进行中',submitted:'已提交',completed:'已完成',cancelled:'已取消',unknown:'待确认',ready:'已核对',needs_date:'日期待确认',needs_analysis:'待人工分析',conflict:'存在冲突',draft:'待确认',confirmed:'已确认',queued:'排队中',running:'执行中',failed:'失败',delivered:'已送达',acknowledged:'已收到',snoozed:'稍后提醒',preview:'影子预览',sending:'投递中',ok:'正常',error:'异常',task:'任务',event:'活动',exam:'考试',assignment:'作业',quiz:'测验',workbench:'工作台',email:'邮件',feishu:'飞书',missing_estimate:'缺少用时估计',needs_review:'需要人工核对',insufficient_time:'可用时间不足',source_date:'来源日期冲突',calendar_edit:'日历编辑冲突',calendar_write:'日历写入冲突'};
-const navs = [['config','⚙','账号与同步','CONNECTIONS'],['items','▤','作业与截止','ASSIGNMENTS'],['sources','⇄','运行记录','OPERATIONS'],['overview','◈','总览','OVERVIEW'],['mail','✉','邮件收件箱','MAIL INBOX'],['plans','▦','计划草稿','PLAN DRAFTS'],['notices','♧','提醒中心','NOTIFICATIONS']];
+const navs = [['config','⚙','账号与同步','CONNECTIONS'],['items','▤','作业与截止','ASSIGNMENTS'],['sources','⇄','运行记录','OPERATIONS'],['overview','◈','总览','OVERVIEW'],['mail','✉','邮件收件箱','MAIL INBOX'],['plans','▦','计划草稿','PLAN DRAFTS'],['notices','♧','提醒中心','NOTIFICATIONS'],['tags','◇','标签管理','LABELS']];
 
 function el(tag, attrs = {}, ...children) {
   const node = document.createElement(tag);
@@ -62,12 +62,15 @@ async function api(path, method = 'GET', body, keyed = false) {
 async function refresh(silent = false, force = false) {
   if(state.loading || !state.session?.authenticated) return;
   state.loading=true; updateConnection();
+  const loadedPage=state.page;
   try {
     const dashboard = await api('/dashboard');
-    let data={dashboard};
+    let data={...state.data,dashboard};
     if(!state.session.remote) {
-      const endpoints=['items','drafts','notifications','artifacts','jobs','config','conflicts','calendar-events','connections'];
-      const values=await Promise.all(endpoints.map(x=>api('/'+x+(x==='items'?'?view=formal':''))));
+      // Imported document bodies are fetched only on the operations page.
+      const endpoints=['items','drafts','notifications','jobs','config','conflicts','calendar-events','connections','tags',...(loadedPage==='sources'?['artifacts']:[])];
+      if(!data.artifacts)data.artifacts=[];
+      const values=await Promise.all(endpoints.map(x=>api('/'+x+(x==='items'?'?view=formal':x==='tags'?'?include_archived=true':''))));
       endpoints.forEach((key,index)=>data[key]=values[index]);
       const missing=[...new Set(data.conflicts.map(c=>c.item_id))].filter(id=>!data.items.some(i=>i.id===id));
       data.conflictItems=await Promise.all(missing.map(id=>api('/items/'+encodeURIComponent(id))));
@@ -77,7 +80,7 @@ async function refresh(silent = false, force = false) {
   } catch(error) {
     state.offline=true;
     if(state.session.authenticated) { renderPage(); if(!silent) toast(error.message,true); }
-  } finally { state.loading=false; updateConnection(); }
+  } finally { state.loading=false; updateConnection(); if(state.page==='sources'&&loadedPage!=='sources')refresh(true,true); }
 }
 async function mutate(path, method, body, keyed, message) {
   if(state.offline) throw new Error('当前离线，恢复连接后才能保存。');
@@ -98,7 +101,7 @@ function shell() {
   app.replaceChildren(el('div',{class:'shell'},el('aside',{class:'sidebar'},brand(),el('p',{class:'nav-label'},remote?'REMOTE DASHBOARD':'WORKSPACE'),nav,el('div',{class:'sidebar-foot'},el('strong',{},remote?'远程只读看板':'本地维护后台'),remote?'仅展示脱敏状态与时间安排':'账号授权、同步设置与异常核对。',btn('退出登录',logout,'quiet small'))),el('div',{class:'workspace'},el('header',{class:'topbar'},el('div',{class:'breadcrumb'},'工作台 / ',el('strong',{id:'breadcrumb'},'总览')),el('div',{class:'toolbar'},el('div',{id:'connection',class:'connection','aria-live':'polite'}),btn('↻ 刷新',()=>refresh(), 'small'),btn('退出',logout,'small'))),el('main',{id:'main',tabindex:'-1'}))));
   renderPage();
 }
-function navigate(page) { state.page=page; state.filter=''; renderPage(); document.getElementById('main')?.focus({preventScroll:true}); }
+function navigate(page) { state.page=page; state.filter=''; renderPage(); document.getElementById('main')?.focus({preventScroll:true}); if(page==='sources')refresh(true,true); }
 function updateConnection() {
   const node=document.getElementById('connection'); if(!node)return;
   node.className='connection'+(state.offline?' offline':'');
@@ -106,7 +109,7 @@ function updateConnection() {
 }
 function heading() {
   const nav=navs.find(n=>n[0]===state.page);
-  const subtitles={overview:state.session.remote?'远程查看学业进展；修改请回到本地工作台。':'从来源到行动，为今天留出清晰的节奏。',items:'截止时间来自来源；学习安排通过草稿核对后确认。',mail:'以纯文本查看原始邮件与规则提取日期，人工核对后再采取行动。',plans:'确定性排程器根据优先级、截止时间和可用时间生成草稿。',notices:'确认收到、稍后提醒，或完成关联事项。',sources:'查看同步健康、日历方向与本地资料，追溯每一份输入。',config:'在这里登录账号、选择日历并检查后台运行。'};
+  const subtitles={tags:'课程、作业、小组与自定义标签。相同名称以所属范围区分；同步不会覆盖人工标记。',overview:state.session.remote?'远程查看学业进展；修改请回到本地工作台。':'从来源到行动，为今天留出清晰的节奏。',items:'截止时间来自来源；学习安排通过草稿核对后确认。',mail:'以纯文本查看原始邮件与规则提取日期，人工核对后再采取行动。',plans:'确定性排程器根据优先级、截止时间和可用时间生成草稿。',notices:'确认收到、稍后提醒，或完成关联事项。',sources:'查看同步健康、日历方向与本地资料，追溯每一份输入。',config:'在这里登录账号、选择日历并检查后台运行。'};
   return el('div',{class:'page-heading'},el('div',{},el('div',{class:'eyebrow'},nav[3]),el('h1',{},state.page==='overview'?'把学业，安排得从容。':nav[2]),el('p',{class:'subtitle'},subtitles[state.page])),state.page==='overview'?el('div',{class:'date-label'},new Date().toLocaleDateString('zh-CN',{month:'long',day:'numeric',weekday:'long'})):null);
 }
 function renderPage() {
@@ -118,7 +121,7 @@ function renderPage() {
   main.replaceChildren(heading());
   if(state.offline)main.append(el('div',{class:'banner error',role:'alert'},'连接中断。显示的是 '+(state.lastUpdated?time(state.lastUpdated):'尚未加载')+' 的数据；写入操作已暂停。点击“刷新”恢复连接。'));
   if(!state.data.dashboard){main.append(empty('尚未取得工作台数据','服务连接恢复后，请点击刷新。'));updateConnection();return;}
-  const renders={overview:overview,items:itemsPage,mail:mailPage,plans:plansPage,notices:noticesPage,sources:sourcesPage,config:configPage};
+  const renders={overview:overview,items:itemsPage,mail:mailPage,plans:plansPage,notices:noticesPage,sources:sourcesPage,config:configPage,tags:tagsPage};
   main.append(renders[state.page]());
   main.append(el('footer',{class:'page-foot'},el('span',{},'ACADEMIC OS  /  学业事务，由你掌握'),el('span',{},'模型分析未启用 · 每 30 秒刷新 · '+(state.data.config?.timezone||'浏览器本地时区'))));
   updateConnection();
@@ -143,20 +146,21 @@ function overview() {
   return root;
 }
 function inputField(text, type, value, attrs={}) {const input=el('input',{type,value:value??'',...attrs});return {input,node:el('label',{class:'field'},text,input)};}
-function selectField(text, options, value, attrs={}) {const input=el('select',attrs,options.map(([v,t])=>el('option',{value:v,selected:v===value},t)));return {input,node:el('label',{class:'field'},text,input)};}
+function selectField(text, options, value, attrs={}) {const input=el('select',{'aria-label':text,...attrs},options.map(([v,t])=>el('option',{value:v,selected:v===value},t)));return {input,node:el('label',{class:'field'},text,input)};}
 function openDialog(title, content) { dialog.replaceChildren(el('div',{class:'dialog-head'},el('h2',{id:'dialog-title'},title),btn('✕',()=>dialog.close(),'quiet small')),el('div',{class:'dialog-content'},content));dialog.showModal(); }
 function formError(form,error) {let node=form.querySelector('.dialog-error');if(!node){node=el('div',{class:'dialog-error',role:'alert'});form.append(node);}node.textContent=error.message;}
 function itemsPage() {
   const root=el('div'),search=el('input',{type:'search',placeholder:'搜索标题或课程','aria-label':'搜索事项',value:state.filter,oninput:e=>{state.filter=e.target.value;renderItems();}});
   const select=el('select',{'aria-label':'事项状态筛选',onchange:e=>{state.status=e.target.value;renderItems();}},[['active','进行中的事项'],['all','全部事项'],...['pending','in_progress','submitted','completed','cancelled','unknown'].map(x=>[x,label(x)])].map(([v,t])=>el('option',{value:v,selected:state.status===v},t)));
-  root.append(el('div',{class:'filterbar'},el('div',{class:'filters'},search,select),btn('＋ 新建事项',()=>editItem(),'primary',state.offline)),el('section',{class:'panel',id:'item-table'}));
+  const tagSelect=el('select',{'aria-label':'标签组合筛选',multiple:true,size:Math.min(4,Math.max(2,(state.data.tags||[]).length)),onchange:e=>{state.tagFilter=[...e.target.selectedOptions].map(o=>o.value);renderItems();}},(state.data.tags||[]).map(t=>el('option',{value:t.id,selected:state.tagFilter.includes(t.id)},tagLabel(t))));
+  root.append(el('details',{class:'tag-filter'},el('summary',{},'标签组合筛选（同时包含）'),tagSelect,btn('清空标签筛选',()=>{state.tagFilter=[];tagSelect.selectedIndex=-1;renderItems();},'small')),el('div',{class:'filterbar'},el('div',{class:'filters'},search,select),btn('＋ 新建事项',()=>editItem(),'primary',state.offline)),el('section',{class:'panel',id:'item-table'}));
   queueMicrotask(renderItems);return root;
 }
 function renderItems() {
   const container=document.getElementById('item-table');if(!container)return;
-  const items=state.data.items.filter(i=>(state.status==='all'||state.status==='active'&&!closedStatuses.has(i.status)||i.status===state.status)&&(!state.filter||`${i.title} ${i.course}`.toLocaleLowerCase().includes(state.filter.toLocaleLowerCase())));
+  const items=state.data.items.filter(i=>state.tagFilter.every(id=>(i.tags||[]).some(t=>t.id===id))&&(state.status==='all'||state.status==='active'&&!closedStatuses.has(i.status)||i.status===state.status)&&(!state.filter||`${i.title} ${i.course}`.toLocaleLowerCase().includes(state.filter.toLocaleLowerCase())));
   if(!items.length){container.replaceChildren(empty(state.filter?'没有匹配的事项':'暂无事项','你可以新建事项，或在“来源与日历”中请求同步。'));return;}
-  const table=el('table',{},el('thead',{},el('tr',{},['事项 / 课程','来源截止','学习安排','用时 / 优先级','状态','操作'].map(t=>el('th',{scope:'col'},t)))),el('tbody',{},items.map(i=>el('tr',{},el('td',{class:'title-cell'},btn(i.title,()=>editItem(i.id),'text-button'),el('div',{class:'row-meta'},i.course||label(i.kind),' · ',badge(label(i.review_state),i.review_state==='ready'?'neutral':'warn'),isMailTodo(i)?badge('邮件待办'):null)),el('td',{},i.source_due_at?time(i.source_due_at):'待公布'),el('td',{},i.scheduled_start?time(i.scheduled_start):'尚未安排',i.calendar_deleted?el('div',{class:'row-meta'},'日历中已删除'):null),el('td',{},i.estimate_minutes?`${i.estimate_minutes} 分钟`:'待估计',el('div',{class:'row-meta'},'优先级 '+i.priority+' / 5')),el('td',{},badge(label(i.status),closedStatuses.has(i.status)?'neutral':'')),el('td',{},el('div',{class:'actions'},...mailLinks(i),btn('编辑',()=>editItem(i.id),'small',state.offline),btn('安排',()=>scheduleItem(i.id),'small',state.offline||closedStatuses.has(i.status))))))));
+  const table=el('table',{},el('thead',{},el('tr',{},['事项 / 课程','来源截止','学习安排','用时 / 优先级','状态','操作'].map(t=>el('th',{scope:'col'},t)))),el('tbody',{},items.map(i=>el('tr',{},el('td',{class:'title-cell'},btn(i.title,()=>editItem(i.id),'text-button'),el('div',{class:'row-meta'},i.course||label(i.kind),' · ',badge(label(i.review_state),i.review_state==='ready'?'neutral':'warn'),isMailTodo(i)?badge('邮件待办'):null,...(i.tags||[]).map(t=>el('span',{class:'badge neutral',title:tagLabel(t)},t.name+(t.archived?'（已归档）':''))))),el('td',{},i.source_due_at?time(i.source_due_at):'待公布'),el('td',{},i.scheduled_start?time(i.scheduled_start):'尚未安排',i.calendar_deleted?el('div',{class:'row-meta'},'日历中已删除'):null),el('td',{},i.estimate_minutes?`${i.estimate_minutes} 分钟`:'待估计',el('div',{class:'row-meta'},'优先级 '+i.priority+' / 5')),el('td',{},badge(label(i.status),closedStatuses.has(i.status)?'neutral':'')),el('td',{},el('div',{class:'actions'},...mailLinks(i),btn('标签',()=>itemTagsDialog(i),'small',state.offline),btn('编辑',()=>editItem(i.id),'small',state.offline),btn('安排',()=>scheduleItem(i.id),'small',state.offline||closedStatuses.has(i.status))))))));
   container.replaceChildren(el('div',{class:'table-wrap'},table));
 }
 function editItem(id) {
@@ -215,7 +219,7 @@ function mailPage() {
   const dates=el('div',{class:'field-grid',hidden:f.date_mode!=='custom'},start.node,end.node);
   const toggleDates=()=>{dates.hidden=mode.input.value!=='custom';start.input.required=end.input.required=!dates.hidden;};
   mode.input.addEventListener('change',toggleDates);toggleDates();
-  form.append(el('div',{class:'field-grid'},search.node,account.node,review.node,mode.node),dates,el('div',{class:'form-actions'},el('button',{type:'submit',class:'primary'},'查询邮件'),btn('清空筛选',()=>{state.mailFilters=defaultMailFilters();saveMailFilters();state.mailPageData=null;renderPage();})),el('p',{class:'subtitle'},'未确认候选不产生截止提醒 · 新邮件到达通知保留 · 正文按需加载'));
+  form.append(el('div',{class:'field-grid'},search.node,account.node,review.node,mode.node),dates,el('div',{class:'form-actions'},el('button',{type:'submit',class:'primary'},'查询邮件'),btn('生成内容简报',openMailDigest,'small',state.offline),btn('清空筛选',()=>{state.mailFilters=defaultMailFilters();saveMailFilters();state.mailPageData=null;renderPage();})),el('p',{class:'subtitle'},'未确认候选不产生截止提醒 · 新邮件到达通知保留 · 正文按需加载'));
   form.addEventListener('submit',event=>{
     event.preventDefault();
     if(mode.input.value==='custom'&&end.input.value<start.input.value){formError(form,new Error('结束日期必须不早于开始日期。'));return;}
@@ -312,6 +316,58 @@ function candidateCard(item,reload,current) {
   card.addEventListener('submit',event=>{event.preventDefault();save('confirm');});
   return card;
 }
+
+const tagKinds={course:'课程',assignment:'作业',group:'小组',custom:'自定义'};
+function tagLabel(tag) {const course=(state.data.tags||[]).find(t=>t.id===tag.scope);return (tagKinds[tag.kind]||tag.kind)+' / '+tag.name+(tag.scope?' · '+(course?course.name+' / '+course.scope:tag.scope):'')+(tag.archived?'（已归档）':'');}
+function itemTagsDialog(item) {
+  const chosen=new Set((item.tags||[]).map(t=>t.id));
+  const rows=(state.data.tags||[]).filter(t=>!t.archived||chosen.has(t.id)).map(t=>{
+    const input=el('input',{type:'checkbox',checked:chosen.has(t.id),'aria-label':tagLabel(t)});
+    return {tag:t,input,node:el('label',{class:'tag-choice'},input,tagLabel(t))};
+  });
+  const form=el('form',{},el('p',{class:'subtitle'},item.title+' · 标签不会确认邮件候选、移动安排或修改来源归属。'),el('div',{class:'tag-choices section-gap'},rows.length?rows.map(r=>r.node):empty('尚无标签','请先在高级核对工具的标签管理创建。')));
+  const save=el('button',{type:'submit',class:'primary',disabled:state.offline},'保存标签');
+  form.append(el('div',{class:'form-actions'},btn('取消',()=>dialog.close()),save));
+  form.addEventListener('submit',async e=>{e.preventDefault();save.disabled=true;try{await mutate('/items/'+encodeURIComponent(item.id)+'/tags','PUT',{expected_version:item.version,tag_ids:rows.filter(r=>r.input.checked).map(r=>r.tag.id)},true,'标签已保存');dialog.close();}catch(error){formError(form,error);}finally{save.disabled=state.offline;}});
+  openDialog('事项标签',form);
+}
+function tagsPage() {
+  const name=inputField('标签名称','text','',{required:true,maxlength:80});
+  const kind=selectField('标签类型',Object.entries(tagKinds),state.tagDraft?.kind||'custom');
+  const scope=inputField('所属范围','text',state.tagDraft?.scope||'',{maxlength:200,placeholder:'例如 2026秋 / COMP1000；不确定请留空'});
+  const parent=selectField('所属课程（作业／小组可选）',[['','不指定课程'],...(state.data.tags||[]).filter(t=>t.kind==='course'&&!t.archived).map(t=>[t.id,t.name+' · '+t.scope])],state.tagDraft?.parentCourse||'');
+  const adjust=()=>{parent.input.disabled=!['assignment','group'].includes(kind.input.value);scope.input.disabled=!parent.input.disabled&&!!parent.input.value;};
+  kind.input.addEventListener('change',adjust);parent.input.addEventListener('change',adjust);adjust();
+  const form=el('form',{class:'panel-body'},el('div',{class:'field-grid'},name.node,kind.node,parent.node,scope.node));
+  const create=el('button',{type:'submit',class:'primary',disabled:state.offline},'创建标签');form.append(el('div',{class:'form-actions'},create));
+  form.addEventListener('submit',async e=>{e.preventDefault();create.disabled=true;try{state.tagDraft={kind:kind.input.value,scope:scope.input.value.trim(),parentCourse:parent.input.value};await mutate('/tags','POST',{name:name.input.value.trim(),kind:kind.input.value,scope:!parent.input.disabled&&parent.input.value?parent.input.value:scope.input.value.trim()},true,'标签已创建');}catch(error){formError(form,error);}finally{create.disabled=state.offline;}});
+  const rows=el('div',{class:'list'},(state.data.tags||[]).map(tag=>el('div',{class:'row'},el('div',{class:'row-main'},el('strong',{},tag.name),el('div',{class:'row-meta'},(tagKinds[tag.kind]||tag.kind)+' · '+(tag.scope||'全局')+' · 版本 '+tag.version+(tag.archived?' · 已归档':''))),el('div',{class:'actions'},btn('重命名',()=>renameTag(tag),'small',state.offline),btn(tag.archived?'恢复标签':'归档标签',async()=>{try{await mutate('/tags/'+tag.id,'PATCH',{expected_version:tag.version,changes:{archived:!tag.archived}},false,'标签状态已更新');}catch(error){toast(error.message,true);}},'small',state.offline)))));
+  return el('div',{class:'stack'},panel('创建标签','为同名课程、作业或小组填写明确范围；归档保留历史关联。',form),panel('标签目录','多标签在事项页选择；组合筛选同时包含所选标签。',rows.children.length?rows:empty('还没有标签')));
+}
+function renameTag(tag) {
+  const name=inputField('标签名称','text',tag.name,{required:true,maxlength:80});
+  const form=el('form',{},name.node,el('div',{class:'form-actions'},el('button',{type:'submit',class:'primary'},'保存名称')));
+  form.addEventListener('submit',async e=>{e.preventDefault();const button=form.querySelector('button');button.disabled=true;try{await mutate('/tags/'+tag.id,'PATCH',{expected_version:tag.version,changes:{name:name.input.value.trim()}},false,'名称已更新');dialog.close();}catch(error){formError(form,error);}finally{button.disabled=state.offline;}});
+  openDialog('重命名标签',form);
+}
+async function openMailDigest() {
+  const content=el('div',{},empty('正在生成原文摘录…'));
+  openDialog('含正文邮件简报',content);
+  let offset=0,request=0;
+  const load=async()=>{
+    const active=++request;
+    try {
+      const f=state.mailFilters||defaultMailFilters();
+      const params=new URLSearchParams({limit:'20',offset:String(offset),body_chars:'800',q:f.q,account:f.account,review:f.review,date_mode:f.date_mode});
+      if(f.date_mode==='custom'){params.set('start',f.start);params.set('end',f.end);}
+      const page=await api('/mail/digest?'+params);
+      if(active!==request||!dialog.open||!content.isConnected)return;
+      content.replaceChildren(el('p',{class:'subtitle'},page.notice+' · 共 '+page.total+' 封 · '+page.timezone),el('div',{class:'banner warn section-gap'},page.health.data_stale?'后台数据可能过期，请检查运行记录与最近同步。':'内容来自最近一次成功采集，不代表邮箱实时推送。'),el('div',{class:'stack'},page.items.length?page.items.map(m=>el('article',{class:'mail-candidate'},el('h3',{},m.subject||'(无主题)'),el('p',{class:'subtitle'},m.from+' · '+m.account+' · '+time(m.received_at)),el('pre',{class:'mail-body'},m.body_excerpt||'（邮件没有正文）'),m.body_truncated?el('p',{class:'subtitle'},'已截断 · 查看原文获取完整内容'):null,el('div',{class:'actions section-gap'},btn('查看邮件原文',()=>openMail(m),'small'),badge('待核对 '+m.review_counts.pending+' 项','warn')))):empty('没有符合筛选的邮件')),el('div',{class:'form-actions'},btn('上一页',()=>{offset=Math.max(0,offset-20);load();},'small',offset===0),btn('下一页',()=>{offset+=20;load();},'small',offset+20>=page.total)));
+    } catch(error) {if(active===request&&content.isConnected){content.replaceChildren(el('div',{role:'alert',class:'dialog-error'},error.message),btn('重试简报',load));}}
+  };
+  await load();
+}
+
 function plansPage() {
   const root=el('div'),days=el('select',{'aria-label':'计划范围'},[3,7,14,30].map(n=>el('option',{value:n,selected:n===7},'未来 '+n+' 天')));
   const generate=btn('生成计划草稿',async()=>{generate.disabled=true;try{const result=await mutate('/plans/generate','POST',{days:Number(days.value)},true);toast(result.changes.length?`已生成 ${result.changes.length} 项安排，请核对后确认。`:'没有生成新的安排。请检查用时、截止时间和可用时段。');if(result.unplaced?.length)openUnplaced(result.unplaced);}catch(error){toast(error.message,true);}finally{generate.disabled=state.offline;}},'primary',state.offline);

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import uuid
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -10,6 +11,9 @@ SCHEMA = """
 CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS items(id TEXT PRIMARY KEY, document TEXT NOT NULL, version INTEGER NOT NULL, updated_at TEXT NOT NULL);
 CREATE INDEX IF NOT EXISTS item_dedup ON items(json_extract(document,'$.dedup_key'));
+CREATE TABLE IF NOT EXISTS tags(id TEXT PRIMARY KEY, name TEXT NOT NULL, kind TEXT NOT NULL, scope TEXT NOT NULL, name_key TEXT NOT NULL, version INTEGER NOT NULL, archived INTEGER NOT NULL DEFAULT 0, UNIQUE(kind,scope,name_key));
+CREATE TABLE IF NOT EXISTS item_tags(item_id TEXT NOT NULL REFERENCES items(id) ON DELETE CASCADE, tag_id TEXT NOT NULL REFERENCES tags(id), PRIMARY KEY(item_id,tag_id));
+CREATE INDEX IF NOT EXISTS tag_items ON item_tags(tag_id,item_id);
 CREATE TABLE IF NOT EXISTS source_records(source TEXT NOT NULL, source_id TEXT NOT NULL, item_id TEXT NOT NULL, document TEXT NOT NULL, PRIMARY KEY(source,source_id));
 CREATE INDEX IF NOT EXISTS source_items ON source_records(item_id);
 CREATE TABLE IF NOT EXISTS sources(id TEXT PRIMARY KEY, status TEXT NOT NULL, last_success TEXT, last_attempt TEXT NOT NULL, error TEXT, detail TEXT NOT NULL DEFAULT '{}');
@@ -28,6 +32,14 @@ CREATE TABLE IF NOT EXISTS calendar_events(provider TEXT NOT NULL, calendar_id T
 CREATE TABLE IF NOT EXISTS cursors(key TEXT PRIMARY KEY, value TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS mail(id TEXT PRIMARY KEY, account TEXT NOT NULL, document TEXT NOT NULL, received_at TEXT NOT NULL);
 CREATE INDEX IF NOT EXISTS mail_received ON mail(received_at DESC);
+CREATE INDEX IF NOT EXISTS mail_received_jd ON mail(julianday(received_at) DESC,id DESC);
+CREATE INDEX IF NOT EXISTS mail_message_identity ON mail(account,json_extract(document,'$.id'));
+CREATE TABLE IF NOT EXISTS mail_feed(sequence INTEGER PRIMARY KEY AUTOINCREMENT, mail_key TEXT NOT NULL UNIQUE, collected_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS mail_consumers(name TEXT PRIMARY KEY, cursor INTEGER NOT NULL DEFAULT 0);
+CREATE TRIGGER IF NOT EXISTS mail_arrival_feed AFTER INSERT ON mail BEGIN
+    INSERT OR IGNORE INTO mail_feed(mail_key,collected_at) VALUES(NEW.id,strftime('%Y-%m-%dT%H:%M:%fZ','now'));
+END;
+INSERT OR IGNORE INTO mail_feed(mail_key,collected_at) SELECT id,strftime('%Y-%m-%dT%H:%M:%fZ','now') FROM mail WHERE NOT EXISTS(SELECT 1 FROM mail_feed f WHERE f.mail_key=mail.id) ORDER BY rowid;
 CREATE TABLE IF NOT EXISTS artifacts(id TEXT PRIMARY KEY, kind TEXT NOT NULL, document TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS conflicts(id TEXT PRIMARY KEY, kind TEXT NOT NULL, item_id TEXT, document TEXT NOT NULL, state TEXT NOT NULL DEFAULT 'open', created_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS audit(id INTEGER PRIMARY KEY AUTOINCREMENT, actor TEXT NOT NULL, action TEXT NOT NULL, entity_id TEXT, document TEXT NOT NULL, created_at TEXT NOT NULL);
@@ -48,6 +60,11 @@ class Database:
         self.path = Path(path).resolve()
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with self.connect() as db:
+            if db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='items'").fetchone() and not db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='tags'").fetchone():
+                backup = self.path.parent / 'backups' / ('before-tags-digest-' + uuid.uuid4().hex + '.sqlite3')
+                backup.parent.mkdir(parents=True, exist_ok=True)
+                with sqlite3.connect(backup) as saved:
+                    db.backup(saved)
             db.execute("PRAGMA journal_mode=WAL")
             db.executescript(SCHEMA)
             db.execute("INSERT OR IGNORE INTO meta VALUES('schema_version','1')")
@@ -57,6 +74,8 @@ class Database:
         connection = sqlite3.connect(self.path, timeout=30)
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA foreign_keys=ON")
+        connection.execute("PRAGMA cache_size=-1024")
+        connection.execute("PRAGMA temp_store=FILE")
         try:
             yield connection
             connection.commit()

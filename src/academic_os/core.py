@@ -56,12 +56,16 @@ class Core:
         row = db.execute("SELECT document FROM items WHERE id=?", (item_id,)).fetchone()
         if not row:
             raise KeyError(item_id)
-        return json.loads(row[0])
+        item = json.loads(row[0])
+        from .tags import item_tags
+        item['tags'] = item_tags(db, item_id)
+        return item
 
     @staticmethod
     def _put(db, item):
         item["dedup_key"] = canonical(item["course"]) + ":" + canonical(item["title"]) if item.get("course") else None
-        db.execute("INSERT OR REPLACE INTO items VALUES(?,?,?,?)", (item["id"], dumps(item), item["version"], item["updated_at"]))
+        document = {k: v for k, v in item.items() if k != 'tags'}
+        db.execute("INSERT INTO items VALUES(?,?,?,?) ON CONFLICT(id) DO UPDATE SET document=excluded.document,version=excluded.version,updated_at=excluded.updated_at", (item["id"], dumps(document), item["version"], item["updated_at"]))
 
     def _new_item(self, data):
         title = str(data.get("title", "")).strip()
@@ -106,6 +110,8 @@ class Core:
             raise ValueError('Unknown item view')
         with self.db.connect() as db:
             items = [json.loads(r[0]) for r in db.execute("SELECT document FROM items ORDER BY updated_at DESC")]
+            from .tags import attach_tags
+            attach_tags(db, items)
         return [item for item in items if view == 'all' or view == 'formal' and formal(item)
                 or view == 'mail_pending' and review_state(item) == 'pending'
                 or view == 'mail_ignored' and review_state(item) == 'ignored']
