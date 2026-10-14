@@ -42,6 +42,8 @@ class Core:
         self.db, self.settings = db, settings
         self.plan_lock = threading.Lock()
         self.configuration_lock = threading.RLock()
+        from .classification import migrate as migrate_classification
+        migrate_classification(self)
         with self.db.transaction() as connection:
             for row in connection.execute("SELECT document FROM items WHERE json_extract(document,'$.dedup_key') IS NULL AND json_extract(document,'$.course') != ''").fetchall():
                 self._put(connection, json.loads(row[0]))
@@ -63,9 +65,13 @@ class Core:
 
     @staticmethod
     def _put(db, item):
+        from .classification import apply
+        apply(item, db)
         item["dedup_key"] = canonical(item["course"]) + ":" + canonical(item["title"]) if item.get("course") else None
         document = {k: v for k, v in item.items() if k != 'tags'}
         db.execute("INSERT INTO items VALUES(?,?,?,?) ON CONFLICT(id) DO UPDATE SET document=excluded.document,version=excluded.version,updated_at=excluded.updated_at", (item["id"], dumps(document), item["version"], item["updated_at"]))
+        from .tags import item_tags
+        item['tags'] = item_tags(db, item['id'])
 
     def _new_item(self, data):
         title = str(data.get("title", "")).strip()
@@ -192,7 +198,7 @@ class Core:
         with self.db.transaction() as db:
             for record in records:
                 sid = str(record["source_id"])
-                normalized = {k: record[k] for k in ("title", "course", "kind", "due_at", "submission_status", "url", "weight_pct", "estimate_minutes", "review_state", "evidence_text") if k in record}
+                normalized = {k: record[k] for k in ("title", "course", "course_id", "course_site", "kind", "due_at", "submission_status", "url", "weight_pct", "estimate_minutes", "review_state", "evidence_text") if k in record}
                 if "due_at" in normalized:
                     normalized["due_at"] = iso(normalized["due_at"])
                 previous = db.execute("SELECT * FROM source_records WHERE source=? AND source_id=?", (source, sid)).fetchone()

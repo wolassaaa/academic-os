@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import sqlite3
+import json
 import unicodedata
 
 from .core import Conflict, identifier, utcnow
@@ -9,7 +10,9 @@ from .db import dumps
 
 
 def item_tags(db, item_id):
-    return [dict(row) for row in db.execute('SELECT t.id,t.name,t.kind,t.scope,t.version,t.archived FROM tags t JOIN item_tags x ON x.tag_id=t.id WHERE x.item_id=? ORDER BY t.kind,t.name,t.id', (item_id,))]
+    manual = [{**dict(row), 'origin': 'manual'} for row in db.execute('SELECT t.id,t.name,t.kind,t.scope,t.version,t.archived FROM tags t JOIN item_tags x ON x.tag_id=t.id WHERE x.item_id=? ORDER BY t.kind,t.name,t.id', (item_id,))]
+    row = db.execute("SELECT json_extract(document,'$.automatic_tags') FROM items WHERE id=?", (item_id,)).fetchone()
+    return manual + (json.loads(row[0]) if row and row[0] else [])
 
 
 def attach_tags(db, items):
@@ -18,7 +21,9 @@ def attach_tags(db, items):
         item['tags'] = []
     for row in db.execute('SELECT x.item_id,t.id,t.name,t.kind,t.scope,t.version,t.archived FROM item_tags x JOIN tags t ON t.id=x.tag_id ORDER BY t.kind,t.name,t.id'):
         if row['item_id'] in by_id:
-            by_id[row['item_id']]['tags'].append({k: row[k] for k in row.keys() if k != 'item_id'})
+            by_id[row['item_id']]['tags'].append({**{k: row[k] for k in row.keys() if k != 'item_id'}, 'origin': 'manual'})
+    for item in items:
+        item['tags'] += item.get('automatic_tags', [])
 
 
 def validated(name, kind, scope):
@@ -89,7 +94,10 @@ class Tags:
             if item['version'] != expected_version:
                 raise Conflict('item_version_changed')
             existing = {t['id'] for t in item['tags']}
+            automatic = {t['id'] for t in item.get('automatic_tags', [])}
             for tag_id in tag_ids:
+                if tag_id in automatic:
+                    continue
                 try:
                     tag = self._get(db, tag_id)
                 except KeyError:
@@ -97,7 +105,7 @@ class Tags:
                 if tag['archived'] and tag_id not in existing:
                     raise ValueError('Archived tag cannot be newly assigned')
             db.execute('DELETE FROM item_tags WHERE item_id=?', (item_id,))
-            db.executemany('INSERT INTO item_tags VALUES(?,?)', [(item_id, t) for t in tag_ids])
+            db.executemany('INSERT INTO item_tags VALUES(?,?)', [(item_id, t) for t in tag_ids if t not in automatic])
             approved = db.execute("SELECT id FROM jobs WHERE kind='calendar_push' AND json_extract(payload,'$.item_id')=? AND json_extract(payload,'$.version')=? AND status IN ('queued','failed','running')", (item_id, item['version'])).fetchall()
             item.update(version=item['version'] + 1, updated_at=utcnow())
             self.core._put(db, item)

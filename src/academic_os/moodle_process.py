@@ -235,6 +235,8 @@ def collect_snapshot(config, *, client=None, budget_seconds=840):
                         record["review_state"] = "needs_date"
                     records[sid] = record
                 record = records[sid]
+                record['course_id'] = course['id']
+                record['course_site'] = config.get('credentials', {}).get('site_url', '')
                 evidence = json.loads(record.get("evidence_text", "{}"))
                 evidence["module"] = module
                 record["evidence_text"] = _evidence(evidence)
@@ -279,7 +281,9 @@ def main():
     except Exception:  # noqa: BLE001 - subprocess boundary must emit sanitized JSON
         result = {"complete": False, "records": [], "errors": ["moodle_collection_failed"]}
     # Never log exceptions: transport diagnostics can embed tokens or credential URLs.
-    sys.stdout.write(json.dumps(result, ensure_ascii=False))
+    # Frozen Windows pipe encodings can ignore PYTHONIOENCODING. ASCII JSON
+    # transports every Unicode title losslessly without a console codec crash.
+    sys.stdout.write(json.dumps(result, ensure_ascii=True))
 
 
 if __name__ == "__main__":

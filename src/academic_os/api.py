@@ -79,6 +79,15 @@ class FeedAck(Payload):
     expected_cursor: int = Field(ge=0)
 
 
+class ClassificationPreview(Payload):
+    expected_version: int = Field(ge=1)
+
+
+class ClassificationRuleUpdate(Payload):
+    expected_revision: int = Field(ge=0)
+    rules: list[dict] = Field(max_length=100)
+
+
 def create_app(core, remote=False, config_path=None, connections=None):
     app = FastAPI(title="Academic OS Remote Dashboard" if remote else "Academic OS 2.0 API", version="2.0.0", docs_url=None if remote else "/docs", redoc_url=None, openapi_url=None if remote else "/openapi.json")
     auth = Auth(core.db, core.settings)
@@ -344,6 +353,36 @@ def create_app(core, remote=False, config_path=None, connections=None):
         principal(request)
         from .tags import Tags
         return Tags(core).list(include_archived)
+
+    @app.get('/api/v1/classification/spec')
+    def classification_spec(request: Request):
+        principal(request)
+        from .classification_ai import specification
+        return specification()
+
+    @app.get('/api/v1/classification/rules')
+    def classification_rules(request: Request):
+        principal(request)
+        from .classification import ClassificationRules
+        return ClassificationRules(core).get()
+
+    @app.put('/api/v1/classification/rules')
+    def classification_rules_update(payload: ClassificationRuleUpdate, request: Request):
+        actor = owner(request)
+        from .classification import ClassificationRules
+        return ClassificationRules(core).replace(payload.rules, payload.expected_revision, actor)
+
+    @app.post('/api/v1/items/{item_id}/classification/ai-preview')
+    def classification_preview(item_id: str, payload: ClassificationPreview, request: Request):
+        principal(request)
+        item = core.get_item(item_id)
+        if item['version'] != payload.expected_version:
+            raise Conflict('item_version_changed')
+        from .classification_ai import DisabledClassificationAI
+        return DisabledClassificationAI().propose({'item_id': item_id, 'item_version': item['version'],
+                                                   'classification_fingerprint': item['classification']['fingerprint'],
+                                                   'rules_revision': item['classification']['rules_revision'],
+                                                   'unresolved_fields': item['classification']['unresolved_fields']})
 
     @app.post('/api/v1/tags')
     def add_tag(payload: TagCreate, request: Request, idempotency_key: str | None = Header(default=None)):
