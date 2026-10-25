@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 
 from .core import Conflict, identifier, utcnow
 from .db import dumps
+from . import personal_status
 from .mail_triage import formal, review_revision
 
 
@@ -97,6 +98,7 @@ class Notifications:
             if row["item_id"] and action == "complete":
                 item = self.core._get(db, row["item_id"])
                 item.update(status="completed", version=item["version"] + 1, updated_at=utcnow())
+                personal_status.record(item, "completed", actor, item["updated_at"])
                 self.core._put(db, item)
                 db.execute("UPDATE notifications SET state='completed' WHERE item_id=?", (row["item_id"],))
                 self.core._enqueue(db, "calendar_push", {"item_id": item["id"], "version": item["version"]}, f"calendar:{item['id']}:{item['version']}")

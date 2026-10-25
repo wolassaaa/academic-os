@@ -73,6 +73,7 @@ async function refresh(silent = false, force = false) {
       const values=await Promise.all(endpoints.map(x=>api('/'+x+(x==='items'?'?view=formal':x==='tags'?'?include_archived=true':''))));
       endpoints.forEach((key,index)=>data[key]=values[index]);
       data.mailCandidates=await api('/items?view=mail_pending');
+      if(loadedPage==='items'&&state.itemView==='mail_ignored')data.mailIgnored=await api('/items?view=mail_ignored');
       const missing=[...new Set(data.conflicts.map(c=>c.item_id))].filter(id=>!data.items.some(i=>i.id===id));
       data.conflictItems=await Promise.all(missing.map(id=>api('/items/'+encodeURIComponent(id))));
     }
@@ -91,6 +92,12 @@ async function mutate(path, method, body, keyed, message) {
   if(message) toast(message);
   return result;
 }
+function entryPage(){
+  const query=new URLSearchParams(location.search),page=query.get('page');
+  const selected=state.session.remote?'overview':['items','config','sources','mail','plans'].includes(page)?page:'config';
+  state.focusItemId=selected==='items'?query.get('item'):null;
+  if(state.focusItemId){state.status='all';const view=query.get('view');if(['formal','mail_pending','mail_ignored'].includes(view))state.itemView=view;}return selected;
+}
 function brand() { return el('div',{class:'brand'},el('div',{class:'mark','aria-hidden':'true'},'A'),el('div',{},el('div',{class:'brand-name'},'Academic OS'),el('div',{class:'brand-sub'},'YOUR ACADEMIC COMPASS'))); }
 function shell() {
   const remote=state.session.remote;
@@ -99,10 +106,11 @@ function shell() {
   const nav=el('nav',{class:'nav','aria-label':'主导航'});
   for(const [id,icon,title] of navs.filter(n=>remote?n[0]==='overview':['config','items','mail','sources'].includes(n[0]))) nav.append(btn([el('span',{class:'nav-icon','aria-hidden':'true'},icon),title],()=>navigate(id),'nav-'+id));
   if(!remote) nav.append(el('details',{},el('summary',{},'高级核对工具'),navs.filter(n=>!['config','items','mail','sources'].includes(n[0])).map(([id,icon,title])=>btn([icon+' ',title],()=>navigate(id),'nav-'+id))));
+  nav.append(el('a',{href:'/board/',class:'quiet small'},remote?'新看板 · 只读':'新看板'));
   app.replaceChildren(el('div',{class:'shell'},el('aside',{class:'sidebar'},brand(),el('p',{class:'nav-label'},remote?'REMOTE DASHBOARD':'WORKSPACE'),nav,el('div',{class:'sidebar-foot'},el('strong',{},remote?'远程只读看板':'本地维护后台'),remote?'仅展示脱敏状态与时间安排':'账号授权、同步设置与异常核对。',btn('退出登录',logout,'quiet small'))),el('div',{class:'workspace'},el('header',{class:'topbar'},el('div',{class:'breadcrumb'},'工作台 / ',el('strong',{id:'breadcrumb'},'总览')),el('div',{class:'toolbar'},el('div',{id:'connection',class:'connection','aria-live':'polite'}),btn('↻ 刷新',()=>refresh(), 'small'),btn('退出',logout,'small'))),el('main',{id:'main',tabindex:'-1'}))));
   renderPage();
 }
-function navigate(page) { state.page=page; state.filter=''; renderPage(); document.getElementById('main')?.focus({preventScroll:true}); if(page==='sources')refresh(true,true); }
+function navigate(page) { state.focusItemId=null;state.page=page; state.filter=''; renderPage(); document.getElementById('main')?.focus({preventScroll:true}); if(page==='sources')refresh(true,true); }
 function updateConnection() {
   const node=document.getElementById('connection'); if(!node)return;
   node.className='connection'+(state.offline?' offline':'');
@@ -156,19 +164,20 @@ function itemsPage() {
   const category=selectField('事项分类',[['all','全部分类'],['assignment','作业'],['quiz','测验'],['exam','考试'],['event','活动'],['task','其他事项'],['unidentified','待分类']],state.categoryFilter,{onchange:e=>{state.categoryFilter=e.target.value;renderItems();}});
   const courses=[...new Map([...(state.data.items||[]),...(state.data.mailCandidates||[])].filter(i=>i.classification?.course_key).map(i=>[i.classification.course_key,i.classification.course])).entries()];
   const course=selectField('所属课程',[['all','全部课程'],['unidentified','课程待识别'],...courses],state.courseFilter,{onchange:e=>{state.courseFilter=e.target.value;renderItems();}});
-  const switchView=view=>{state.itemView=view;state.categoryFilter='all';state.courseFilter='all';state.tagFilter=[];state.filter='';renderPage();};
+  const switchView=view=>{state.focusItemId=null;state.itemView=view;state.categoryFilter='all';state.courseFilter='all';state.tagFilter=[];state.filter='';renderPage();};
   root.append(el('div',{class:'filterbar'},el('div',{class:'actions'},btn('正式事项 · '+state.data.items.length,()=>switchView('formal'),state.itemView==='formal'?'primary':''),btn('待核对邮件 · '+(state.data.mailCandidates||[]).length,()=>switchView('mail_pending'),state.itemView==='mail_pending'?'primary':'')),el('p',{class:'subtitle'},'自动识别课程、类型和明确组别；有冲突保留待分类 · AI 接口未启用')));
   const school=state.data.dashboard.health.sources.find(s=>s.id==='moodle');
   if(school?.status==='error')root.append(el('div',{class:'banner warn'},el('div',{},el('strong',{},'学校作业同步未完整成功'),el('p',{},'当前显示已成功读取的事项；空列表不代表没有作业。邮件候选与学校作业分开显示。')),btn('查看运行记录',()=>navigate('sources'),'small'),btn('重新同步',async()=>{try{await mutate('/sync','POST',{kind:'sources_sync'},true,'已请求同步');}catch(error){toast(error.message,true);}},'small',state.offline)));
   root.append(el('div',{class:'field-grid classification-filters'},category.node,course.node));
   const tagSelect=el('select',{'aria-label':'标签组合筛选',multiple:true,size:Math.min(4,Math.max(2,(state.data.tags||[]).length)),onchange:e=>{state.tagFilter=[...e.target.selectedOptions].map(o=>o.value);renderItems();}},(state.data.tags||[]).map(t=>el('option',{value:t.id,selected:state.tagFilter.includes(t.id)},tagLabel(t))));
   root.append(el('details',{class:'tag-filter'},el('summary',{},'标签组合筛选（同时包含）'),tagSelect,btn('清空标签筛选',()=>{state.tagFilter=[];tagSelect.selectedIndex=-1;renderItems();},'small')),el('div',{class:'filterbar'},el('div',{class:'filters'},search,select),btn('＋ 新建事项',()=>editItem(),'primary',state.offline)),el('section',{class:'panel',id:'item-table'}));
+  if(state.focusItemId)root.prepend(el('div',{class:'banner warn'},'已定位指定事项（包含已完成状态）',btn('查看全部事项',()=>{state.focusItemId=null;state.itemView='formal';state.status='active';history.replaceState(null,'','/?page=items');renderPage();},'small')));
   queueMicrotask(renderItems);return root;
 }
 function renderItems() {
   const container=document.getElementById('item-table');if(!container)return;
-  const pending=state.itemView==='mail_pending';
-  const items=(pending?state.data.mailCandidates||[]:state.data.items).filter(i=>(state.categoryFilter==='all'||(i.classification?.category||'unidentified')===state.categoryFilter)&&(state.courseFilter==='all'||(i.classification?.course_key||'unidentified')===state.courseFilter)&&state.tagFilter.every(id=>(i.tags||[]).some(t=>t.id===id))&&(state.status==='all'||state.status==='active'&&!closedStatuses.has(i.status)||i.status===state.status)&&(!state.filter||`${i.title} ${i.course}`.toLocaleLowerCase().includes(state.filter.toLocaleLowerCase())));
+  const ignored=state.itemView==='mail_ignored',pending=state.itemView==='mail_pending'||ignored;
+  const items=(ignored?state.data.mailIgnored||[]:pending?state.data.mailCandidates||[]:state.data.items).filter(i=>(!state.focusItemId||i.id===state.focusItemId)&&(state.categoryFilter==='all'||(i.classification?.category||'unidentified')===state.categoryFilter)&&(state.courseFilter==='all'||(i.classification?.course_key||'unidentified')===state.courseFilter)&&state.tagFilter.every(id=>(i.tags||[]).some(t=>t.id===id))&&(state.status==='all'||state.status==='active'&&!closedStatuses.has(i.status)||i.status===state.status)&&(!state.filter||`${i.title} ${i.course}`.toLocaleLowerCase().includes(state.filter.toLocaleLowerCase())));
   if(!items.length){container.replaceChildren(empty(state.filter?'没有匹配的事项':'暂无事项','你可以新建事项，或在“来源与日历”中请求同步。'));return;}
   const table=el('table',{},el('thead',{},el('tr',{},['事项 / 课程','来源截止','学习安排','用时 / 优先级','状态','操作'].map(t=>el('th',{scope:'col'},t)))),el('tbody',{},items.map(i=>el('tr',{},el('td',{class:'title-cell'},btn(i.title,()=>pending?reviewCandidate(i):editItem(i.id),'text-button'),el('div',{class:'row-meta'},i.classification?.course||i.course||'课程待识别',' · ',badge(label(i.review_state),i.review_state==='ready'?'neutral':'warn'),isMailTodo(i)?badge('邮件待办'):null,...(i.tags||[]).map(t=>el('span',{class:'badge neutral',title:tagLabel(t)},(t.origin==='auto'?'自动 · ':'')+t.name+(t.archived?'（已归档）':''))))),el('td',{},i.source_due_at?time(i.source_due_at):'待公布'),el('td',{},i.scheduled_start?time(i.scheduled_start):'尚未安排',i.calendar_deleted?el('div',{class:'row-meta'},'日历中已删除'):null),el('td',{},i.estimate_minutes?`${i.estimate_minutes} 分钟`:'待估计',el('div',{class:'row-meta'},'优先级 '+i.priority+' / 5')),el('td',{},badge(label(i.status),closedStatuses.has(i.status)?'neutral':'')),el('td',{},el('div',{class:'actions'},btn('分类依据',()=>classificationDialog(i),'small'),...(pending?[btn('核对邮件',()=>reviewCandidate(i),'primary small',state.offline)]:[...mailLinks(i),btn('标签',()=>itemTagsDialog(i),'small',state.offline),btn('编辑',()=>editItem(i.id),'small',state.offline),btn('安排',()=>scheduleItem(i.id),'small',state.offline||closedStatuses.has(i.status))])))))));
   container.replaceChildren(el('div',{class:'table-wrap'},table));
@@ -541,11 +550,11 @@ function loginScreen() {
   const repeat=setup?inputField('再次输入密码','password','',{required:true,autocomplete:'new-password',minlength:8,maxlength:500}):null;
   const submit=el('button',{type:'submit',class:'primary'},setup?'创建本地账号':'登录工作台');
   const form=el('form',{},username.node,password.node,repeat?.node,submit);
-  form.addEventListener('submit',async e=>{e.preventDefault();submit.disabled=true;try{if(setup){if(password.input.value!==repeat.input.value)throw new Error('两次密码输入不一致。');await api('/setup','POST',{username:username.input.value.trim(),password:password.input.value});state.session.initialized=true;}const result=await api('/login','POST',{username:username.input.value.trim(),password:password.input.value});state.session={...state.session,...result,authenticated:true};state.data={};state.lastUpdated=null;state.offline=false;state.page=state.session.remote?'overview':'config';shell();await refresh();}catch(error){formError(form,error);if(setup&&state.session.initialized){loginScreen();toast('账号已创建，请登录。'+error.message,true);}}finally{submit.disabled=false;}});
+  form.addEventListener('submit',async e=>{e.preventDefault();submit.disabled=true;try{if(setup){if(password.input.value!==repeat.input.value)throw new Error('两次密码输入不一致。');await api('/setup','POST',{username:username.input.value.trim(),password:password.input.value});state.session.initialized=true;}const result=await api('/login','POST',{username:username.input.value.trim(),password:password.input.value});state.session={...state.session,...result,authenticated:true};state.data={};state.lastUpdated=null;state.offline=false;state.page=entryPage();shell();await refresh();}catch(error){formError(form,error);if(setup&&state.session.initialized){loginScreen();toast('账号已创建，请登录。'+error.message,true);}}finally{submit.disabled=false;}});
   app.replaceChildren(el('div',{class:'login-screen'},el('section',{class:'login-art'},brand(),el('h1',{},'把学业，',el('br'),'安排得从容。'),el('p',{},'课程、邮件、截止日期与学习计划，汇聚在一个安静而可靠的工作台。'),el('div',{class:'login-line'}),el('div',{class:'login-foot'},'CLARITY BEFORE ACTION')),el('div',{class:'login-area'},el('div',{class:'login-box'},el('div',{class:'eyebrow'},state.session.remote?'READ-ONLY DASHBOARD':'LOCAL WORKSPACE'),el('h1',{},setup?'建立你的工作台':'欢迎回来'),el('p',{class:'subtitle'},setup?'设置本地管理账号，密码至少 8 个字符。':state.session.remote?'使用本地账号登录远程只读看板。':'登录后查看真实的来源与学业进展。'),form,el('p',{class:'login-caption'},!state.session.initialized&&state.session.remote?'工作台尚未初始化，请先在本地 8765 端口创建账号。':'忘记密码？请在后台主机运行 reset-password 重置；重置后所有浏览器需重新登录。')))));
 }
 async function logout() {try{await api('/logout','POST');state.session.authenticated=false;state.data={};dialog.close();loginScreen();toast('已退出登录');}catch(error){toast(error.message,true);}}
-async function boot() {try{state.session=await api('/session');if(state.session.authenticated){state.page=state.session.remote?'overview':'config';shell();await refresh();}else loginScreen();}catch(error){app.replaceChildren(el('div',{class:'boot'},'Academic OS',el('span',{},error.message),btn('重新连接',boot,'primary section-gap')));}}
+async function boot() {try{state.session=await api('/session');if(state.session.authenticated){state.page=entryPage();shell();await refresh();}else loginScreen();}catch(error){app.replaceChildren(el('div',{class:'boot'},'Academic OS',el('span',{},error.message),btn('重新连接',boot,'primary section-gap')));}}
 document.addEventListener('visibilitychange',()=>{if(!document.hidden)refresh(true);});
 setInterval(()=>{if(!document.hidden)refresh(true);},30000);
 window.addEventListener('online',()=>refresh(true));

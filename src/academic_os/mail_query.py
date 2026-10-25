@@ -17,8 +17,10 @@ def search_mail(core, *, limit=50, offset=0, q=None, account=None,
     if review not in {'all', 'pending', 'ignored'}:
         raise ValueError('Unknown mail review filter')
     if review != 'all':
-        clauses.append("EXISTS (SELECT 1 FROM items i,json_each(i.document,'$.mail_keys') k "
-                       "WHERE k.value=mail.id AND mail_review_state(i.document)=?)")
+        # Build the matching key set once per statement, not once per mail row.
+        # IN preserves any-matching-candidate semantics and deduplicates keys.
+        clauses.append("mail.id IN (SELECT k.value FROM items i,json_each(i.document,'$.mail_keys') k "
+                       "WHERE mail_review_state(i.document)=?)")
         parameters.append(review)
     if q:
         if len(q) > 500:

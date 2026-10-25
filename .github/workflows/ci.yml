@@ -34,6 +34,15 @@ jobs:
         run: |
           python -m ruff check src tests scripts/portable_entry.py scripts/package-handoff.py scripts/check-publishable.py scripts/hermes-config.py
           node --check src/academic_os/web/app.js
+          Get-ChildItem src/academic_os/web/board -Filter '*.js' | ForEach-Object { node --check $_.FullName; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE } }
+          node tests/board_adapter.test.cjs .
+          node tests/board_completion.test.cjs .
+          node tests/board_focus.test.cjs .
+          node tests/board_mail.test.cjs .
+          node tests/board_mail_review.test.cjs .
+          node tests/board_status.test.cjs .
+          node tests/board_history.test.cjs .
+          node tests/board_reopen.test.cjs .
       - name: Unit and integration regressions
         env:
           PYTEST_DISABLE_PLUGIN_AUTOLOAD: '1'
@@ -43,6 +52,13 @@ jobs:
         run: |
           python -m playwright install chromium
           python tests/browser_check.py
+          python tests/board_browser_check.py --screenshots "${{ runner.temp }}/board-screenshots"
+          python tests/board_completion_browser.py --screenshots "${{ runner.temp }}/completion-screenshots"
+          python tests/board_history_browser.py --screenshots "${{ runner.temp }}/history-screenshots"
+          python tests/board_status_browser.py --screenshots "${{ runner.temp }}/status-screenshots"
+          python tests/board_mail_review_browser.py --screenshots "${{ runner.temp }}/mail-review-screenshots"
+          python tests/board_focus_browser.py --screenshots "${{ runner.temp }}/focus-screenshots"
+          python tests/board_mail_browser.py --screenshots "${{ runner.temp }}/mail-board-screenshots"
           python tests/mail_browser_check.py "${{ runner.temp }}/mail-screenshots"
           python tests/triage_browser_check.py "${{ runner.temp }}/triage-screenshots"
           python tests/tags_digest_browser_check.py "${{ runner.temp }}/tags-screenshots"

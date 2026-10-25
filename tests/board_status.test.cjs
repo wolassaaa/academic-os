@@ -1,0 +1,13 @@
+const assert=require('node:assert/strict'),path=require('node:path');
+const M=require(path.resolve(process.argv[2],'src/academic_os/web/board/board-model.js'));
+const item={status:'completed',personal_status:{state:'completed',origin:'explicit'},evidence:[{source:'moodle:fixture',source_id:'a1',submission_status:'not_started'},{source:'canvas:fixture',source_id:'a2',submission_status:'submitted'},{source:'moodle:fixture',source_id:'a3',submission_status:'unknown'}]};
+assert.equal(M.statusFacts(item).personal,'已完成');
+assert.deepEqual(M.statusFacts(item).observations,['moodle:fixture / a1：未提交','canvas:fixture / a2：已提交','moodle:fixture / a3：未能确认']);
+assert.equal(M.statusFacts({...item,personal_status:{state:'completed',origin:'legacy_completed'}}).personal,'历史完成（来源未区分）');
+assert.equal(M.statusFacts({...item,personal_status:null}).personal,'未单独标记');
+assert.equal(M.statusFacts({...item,personal_status:{state:'submitted',origin:'explicit'}}).personal,'自行标记已提交');
+assert.deepEqual(M.statusFacts({...item,evidence:[]}).observations,[]);
+assert.equal(M.statusFacts({...item,evidence:[{source:'moodle:fixture',submission_status:'unexpected'}]}).observations[0],'moodle:fixture：未能确认');
+assert.equal(M.statusFacts({...item,evidence:[{source:'fixture',submission_status:'constructor'}]}).observations[0],'fixture：未能确认');
+assert.equal(M.statusFacts({...item,personal_status:{state:'constructor'}}).personal,'未单独标记');
+console.log('PASS: personal completion never implies school submission; multi-source/unknown/legacy status facts remain distinct.');

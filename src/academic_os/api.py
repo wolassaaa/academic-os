@@ -14,7 +14,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field
 
 from .calendars import calendar_busy
-from .core import Conflict
+from .core import Conflict, utcnow
 from .db import dumps
 from .exports import write_summary
 from .model_gateway import DisabledModelGateway
@@ -46,6 +46,12 @@ class ItemCreate(Payload):
 class ItemUpdate(Payload):
     expected_version: int = Field(ge=1)
     changes: dict
+
+
+class BoardFocus(Payload):
+    item_id: str = Field(min_length=1, max_length=200)
+    mode: Literal['focus', 'pool', 'auto']
+    expected_revision: int = Field(ge=0, strict=True)
 
 
 class Draft(Payload):
@@ -142,6 +148,15 @@ def create_app(core, remote=False, config_path=None, connections=None):
 
     if web.exists():
         app.mount("/assets", StaticFiles(directory=web), name="assets")
+    board = web / "board"
+    if board.exists():
+        app.mount("/board", StaticFiles(directory=board, html=True), name="board")
+
+    @app.get("/api/v1/board-context")
+    def board_context(request: Request):
+        principal(request)
+        # Display-only context, not the owner configuration or account metadata.
+        return {"timezone": core.settings.timezone, "now": utcnow(), "semester": None}
 
     @app.get("/api/v1/session")
     def session(request: Request):
@@ -188,6 +203,22 @@ def create_app(core, remote=False, config_path=None, connections=None):
 
     if remote:
         return app
+
+    def board_user(request):
+        username = principal(request, 'confirm')
+        if request.headers.get('authorization', '').startswith('Bearer '):
+            raise HTTPException(403, 'Personal preferences require a local browser session')
+        return username
+
+    @app.get('/api/v1/board-focus')
+    def board_focus_read(request: Request):
+        from .board_focus import read
+        return read(core, board_user(request))
+
+    @app.put('/api/v1/board-focus')
+    def board_focus_write(payload: BoardFocus, request: Request, idempotency_key: str | None = Header(default=None)):
+        from .board_focus import write
+        return write(core, board_user(request), payload.item_id, payload.mode, payload.expected_revision, key(idempotency_key))
 
     @app.get('/api/v1/instance', include_in_schema=False)
     def instance(request: Request):
@@ -418,13 +449,16 @@ def create_app(core, remote=False, config_path=None, connections=None):
         return core.create_item(payload.model_dump(), actor, key(idempotency_key))
 
     @app.patch("/api/v1/items/{item_id}")
-    def update_item(item_id: str, payload: ItemUpdate, request: Request):
+    def update_item(item_id: str, payload: ItemUpdate, request: Request,
+                    idempotency_key: str | None = Header(default=None)):
         actor = principal(request, "draft")
         if "source_due_at" in payload.changes or payload.changes.get("status") in {"completed", "submitted", "cancelled"}:
             principal(request, "confirm")
         if "title" in payload.changes and core.get_item(item_id).get("scheduled_start"):
             principal(request, "confirm")
-        return core.update_item(item_id, payload.changes, payload.expected_version, actor)
+        return core.update_item(item_id, payload.changes, payload.expected_version, actor,
+                                request_key=key(idempotency_key) if idempotency_key is not None else None,
+                                authorize_reopen=lambda: principal(request, "confirm"))
 
     @app.get("/api/v1/mail")
     def mail(request: Request, limit: int = 100, offset: int = 0, q: str | None = None):

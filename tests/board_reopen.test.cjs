@@ -1,0 +1,14 @@
+const assert=require('node:assert/strict'),path=require('node:path');
+const {create}=require(path.resolve(process.argv[2],'src/academic_os/web/board/service-adapter.js'));
+let remote=false,status=200,fail=false,wrong=false,csrf='fixture-csrf'; const calls=[];
+const item={id:'a/b',title:'Closed fixture',status:'completed',version:4};
+const response=(data,status=200)=>({ok:status<400,status,json:async()=>data});
+const transport=async(url,o)=>{calls.push([url,o]);if(o.method==='PATCH'){if(fail)throw Error('response lost');return response({...item,status:wrong?'completed':'pending',version:5},status);}if(url.endsWith('/session'))return response({authenticated:true,remote,csrf_token:csrf});if(url.endsWith('/board-context'))return response({timezone:'Asia/Taipei',now:'2026-10-19T00:00:00Z'});if(url.endsWith('/health'))return response({sources:[]});return response(remote?{items:[item]}:[item]);};
+(async()=>{const a=create(transport);await a.load();assert.equal((await a.reopen(item,'same-intent')).status,'pending');const [url,o]=calls.at(-1);assert.equal(url,'/api/v1/items/a%2Fb');assert.equal(o.headers['X-CSRF-Token'],csrf);assert.equal(o.headers['Idempotency-Key'],'same-intent');assert.deepEqual(JSON.parse(o.body),{expected_version:4,changes:{status:'pending'}});
+fail=true;await assert.rejects(a.reopen(item,'same-intent'),e=>e.code==='uncertain');fail=false;
+wrong=true;await assert.rejects(a.reopen(item,'same-intent'),e=>e.code==='uncertain');wrong=false;
+for(const [code,error] of [[409,'conflict'],[403,'readonly'],[503,'uncertain']]){status=code;await assert.rejects(a.reopen(item,'same-intent'),e=>e.code===error);}status=200;
+remote=true;await a.load();let n=calls.length;await assert.rejects(a.reopen(item,'same-intent'),e=>e.code==='readonly');assert.equal(calls.length,n);
+remote=false;csrf=null;await a.load();n=calls.length;await assert.rejects(a.reopen(item,'same-intent'),e=>e.code==='readonly');assert.equal(calls.length,n);
+csrf='fixture';await a.load();status=401;await assert.rejects(a.reopen(item,'same-intent'),e=>e.code==='auth');
+console.log('PASS: reopen uses pending/version/CSRF/exact intent; no optimistic success; conflict/auth/remote/missing-CSRF guarded.');})().catch(e=>{console.error(e);process.exitCode=1});

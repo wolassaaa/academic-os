@@ -9,6 +9,7 @@ import uuid
 from datetime import datetime, timezone
 
 from .db import dumps
+from . import personal_status
 from .mail_triage import annotate, formal, invalidate_pending_due, linked_items, migrate, pure_mail, review_state
 
 
@@ -48,6 +49,7 @@ class Core:
             for row in connection.execute("SELECT document FROM items WHERE json_extract(document,'$.dedup_key') IS NULL AND json_extract(document,'$.course') != ''").fetchall():
                 self._put(connection, json.loads(row[0]))
         migrate(self)
+        personal_status.migrate(self)
 
     @staticmethod
     def audit(db, actor, action, entity_id, detail):
@@ -87,7 +89,7 @@ class Core:
         if data.get("review_state", "ready") not in {"ready", "needs_date", "needs_analysis", "conflict"}:
             raise ValueError("Invalid review_state")
         return {"id": identifier("item"), "title": title, "course": str(data.get("course", "")),
-                "kind": data.get("kind", "task"), "status": data.get("status", "pending"),
+                "kind": data.get("kind", "task"), "status": data.get("status", "pending"), "personal_status": None,
                 "source_due_at": due, "deadline_revision": 1, "scheduled_start": None, "scheduled_end": None,
                 "estimate_minutes": estimate, "priority": priority, "weight_pct": data.get("weight_pct"),
                 "review_state": data.get("review_state", "ready" if due else "needs_date"),
@@ -96,6 +98,8 @@ class Core:
     def create_item(self, data, actor="user", key=None):
         item = self._new_item(data)
         item['manual_origin'] = True
+        if 'status' in data:
+            personal_status.record(item, item['status'], actor, utcnow())
         with self.db.transaction() as db:
             if key:
                 fp, replay = self._operation(db, "create:" + key, data)
@@ -159,14 +163,26 @@ class Core:
             db.execute('INSERT INTO operations VALUES(?,?,?)', ('mail-review:' + key, fp, dumps(item)))
             return item
 
-    def update_item(self, item_id, changes, expected_version, actor="user"):
+    def update_item(self, item_id, changes, expected_version, actor="user", request_key=None,
+                    authorize_reopen=None):
         allowed = {"title", "estimate_minutes", "priority", "status", "review_state", "source_due_at"}
         if set(changes) - allowed:
             raise ValueError("Unsupported item fields; use a plan draft to change schedule")
+        if request_key is not None and (not isinstance(request_key, str) or not 1 <= len(request_key) <= 200):
+            raise ValueError("Invalid idempotency key")
         with self.db.transaction() as db:
+            if request_key is not None:
+                operation = 'item-update:' + request_key
+                fp, replay = self._operation(db, operation, {'item_id': item_id, 'changes': changes,
+                                                            'expected_version': expected_version})
+                if replay is not None:
+                    return replay
             item = self._get(db, item_id)
             if item["version"] != expected_version:
                 raise Conflict("item_version_changed")
+            # The permission decision must use the same locked state as the write.
+            if authorize_reopen is not None and "status" in changes and item["status"] in {"completed", "submitted", "cancelled"}:
+                authorize_reopen()
             old_due = item["source_due_at"]
             if "review_state" in changes and changes["review_state"] != "conflict" and db.execute("SELECT 1 FROM conflicts WHERE item_id=? AND state='open'", (item_id,)).fetchone():
                 raise Conflict("resolve_conflict_first")
@@ -176,6 +192,8 @@ class Core:
                 item["source_due_at"] = iso(changes["source_due_at"])
             if item["status"] not in {"pending", "in_progress", "submitted", "completed", "cancelled", "unknown"}:
                 raise ValueError("Invalid status")
+            if "status" in changes:
+                personal_status.record(item, item["status"], actor, utcnow())
             item.update(version=item["version"] + 1, updated_at=utcnow())
             self._put(db, item)
             if old_due != item["source_due_at"]:
@@ -187,6 +205,8 @@ class Core:
                 self._enqueue(db, "calendar_push", {"item_id": item_id, "version": item["version"]}, f"calendar:{item_id}:{item['version']}")
             if item["status"] in {"completed", "submitted", "cancelled"}:
                 db.execute("UPDATE notifications SET state='completed' WHERE item_id=? AND state IN ('queued','failed','snoozed')", (item_id,))
+            if request_key is not None:
+                db.execute("INSERT INTO operations VALUES(?,?,?)", (operation, fp, dumps(item)))
         return item
 
     @staticmethod
@@ -204,6 +224,7 @@ class Core:
                 previous = db.execute("SELECT * FROM source_records WHERE source=? AND source_id=?", (source, sid)).fetchone()
                 if previous and previous["document"] == dumps(normalized):
                     unchanged = self._get(db, previous['item_id'])
+                    personal_status.initialize(unchanged)
                     annotate(db, unchanged)
                     self._put(db, unchanged)
                     out.append(unchanged)
@@ -224,6 +245,8 @@ class Core:
                 elif not item.get('evidence'):
                     item['manual_origin'] = True
                 old_due = item["source_due_at"]
+                if not new:
+                    personal_status.initialize(item)
                 old_status = item["status"]
                 protected = source.startswith('gmail:') and item.get('mail_review', {}).get('state') == 'confirmed'
                 if previous:
@@ -248,8 +271,7 @@ class Core:
                 status = normalized.get("submission_status")
                 # A failed observation is not evidence that submitted work reopened.
                 # Keep the unknown observation in evidence, not as a destructive status update.
-                if status and (status != "unknown" or new or item["status"] == "unknown"):
-                    item["status"] = {"not_started": "pending"}.get(status, status)
+                personal_status.observe(item, status, new=new)
                 if item["review_state"] != "conflict" and not protected:
                     item["review_state"] = normalized.get("review_state") or ("ready" if item["source_due_at"] else "needs_date")
                 annotate(db, item)
