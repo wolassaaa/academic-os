@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import re
 from html import escape
 from pathlib import Path
 from typing import Literal
@@ -94,12 +95,40 @@ class ClassificationRuleUpdate(Payload):
     rules: list[dict] = Field(max_length=100)
 
 
+# Remote full mode: what a tailnet browser may call. Everything else on the remote port is 404 —
+# account connections, OAuth/Moodle flows, tokens, config, setup, agent feed, drafts/calendar writes.
+REMOTE_DASHBOARD_ROUTES = {('GET', '/api/v1/session'), ('POST', '/api/v1/login'), ('POST', '/api/v1/logout'),
+                           ('GET', '/api/v1/dashboard'), ('GET', '/api/v1/board-context')}
+REMOTE_FULL_ROUTES = [(method, re.compile(pattern)) for method, pattern in [
+    ('GET', r'/api/v1/(health|items|tags|mail|mail/search|mail/digest|board-focus)'),
+    ('GET', r'/api/v1/items/[^/]+'),
+    ('GET', r'/api/v1/mail/(?!feed$)[^/]+'),
+    ('PATCH', r'/api/v1/items/[^/]+'),
+    ('PUT', r'/api/v1/items/[^/]+/tags'),
+    ('POST', r'/api/v1/items/[^/]+/mail-review'),
+    ('PUT', r'/api/v1/board-focus'),
+    ('POST', r'/api/v1/sync'),
+]]
+
+
 def create_app(core, remote=False, config_path=None, connections=None):
     app = FastAPI(title="Academic OS Remote Dashboard" if remote else "Academic OS 2.0 API", version="2.0.0", docs_url=None if remote else "/docs", redoc_url=None, openapi_url=None if remote else "/openapi.json")
     auth = Auth(core.db, core.settings)
     notifications = Notifications(core)
     cookie = "aos_remote" if remote else "aos_local"
     web = Path(__file__).parent / "web"
+    full = remote and core.settings.remote_access == 'full'
+
+    def tailnet_login(request):
+        # Set by `tailscale serve` for tailnet users and stripped from client input; absent for Funnel traffic.
+        login = request.headers.get('tailscale-user-login', '').strip()
+        allowed = {name.strip().casefold() for name in core.settings.remote_allowed_logins}
+        return login if login and (not allowed or login.casefold() in allowed) else None
+
+    def access(request):
+        if not remote:
+            return 'local'
+        return 'full' if full and tailnet_login(request) else 'dashboard'
 
     @app.exception_handler(Conflict)
     async def conflict_handler(request, exc):
@@ -117,6 +146,13 @@ def create_app(core, remote=False, config_path=None, connections=None):
     async def security_headers(request, call_next):
         if not remote and request.url.hostname not in {"127.0.0.1", "localhost", "testserver"}:
             return JSONResponse({"error": "invalid_management_host"}, status_code=400)
+        if remote and request.url.path.startswith('/api/'):
+            path = request.url.path
+            routes = [(m, p) for m, p in REMOTE_DASHBOARD_ROUTES] + ([(m, rx) for m, rx in REMOTE_FULL_ROUTES] if access(request) == 'full' else [])
+            matches = [m for m, p in routes if (p == path if isinstance(p, str) else p.fullmatch(path))]
+            if request.method not in matches:
+                # Never fall through to the router: a known path with the wrong method is 405, anything else 404.
+                return JSONResponse({"error": "method_not_allowed" if matches else "not_found"}, status_code=405 if matches else 404)
         response = await call_next(request)
         response.headers.update({"X-Content-Type-Options": "nosniff", "X-Frame-Options": "DENY", "Referrer-Policy": "no-referrer", "Content-Security-Policy": "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'", "Cache-Control": "no-store"})
         return response
@@ -164,7 +200,9 @@ def create_app(core, remote=False, config_path=None, connections=None):
         with core.db.connect() as db:
             initialized = db.execute("SELECT COUNT(*) FROM users").fetchone()[0] > 0
         token = request.cookies.get(cookie)
-        return {"authenticated": bool(user), "username": user, "remote": remote, "initialized": initialized,
+        level = access(request)
+        return {"authenticated": bool(user), "username": user, "remote": remote, "initialized": initialized, "access": level,
+                "tailnet_login": tailnet_login(request) if level == 'full' else None,
                 "csrf_token": hashlib.sha256((token + ":csrf").encode()).hexdigest() if user else None}
 
     @app.post("/api/v1/login")
@@ -201,7 +239,7 @@ def create_app(core, remote=False, config_path=None, connections=None):
                 "conflicts": [{k: c[k] for k in ("id", "kind", "item_id", "state", "created_at")} for c in core.list_conflicts()],
                 "counts": {"active": sum(i["status"] not in {"completed", "submitted", "cancelled"} for i in items), "mail": mail_count, "mail_pending": pending_mail, "review": sum(i["review_state"] != "ready" for i in items), "failed": sum(n["state"] == "failed" for n in notices)}, "remote": remote}
 
-    if remote:
+    if remote and not full:
         return app
 
     def board_user(request):
@@ -248,6 +286,8 @@ def create_app(core, remote=False, config_path=None, connections=None):
         return JSONResponse({'error': connection_error_message(exc)}, status_code=502)
 
     def owner(request):
+        if remote:
+            raise HTTPException(404)  # account management is local-only, even in remote full mode
         actor = principal(request)
         if actor == 'agent':
             raise HTTPException(403, 'Account management requires owner login')

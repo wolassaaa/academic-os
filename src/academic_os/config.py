@@ -21,6 +21,8 @@ class Settings:
     dashboard_port: int = 8766
     agent_gateway_port: int = 0  # 0 = off; loopback Streamable HTTP MCP for a cross-host agent
     agent_stale_minutes: int = 30  # alert when a mail-feed consumer stops polling for this long
+    remote_access: str = 'dashboard'  # 'full': tailnet users (tailscale serve identity) may read and do daily actions remotely
+    remote_allowed_logins: list[str] = field(default_factory=list)  # optional Tailscale login allow-list for full mode
     secure_cookies: bool = True
     session_hours: int = 12
     sync_interval_seconds: int = 300
@@ -51,6 +53,10 @@ class Settings:
             raise ValueError("Use distinct ports in 1024–65535")
         if self.agent_gateway_port and (not 1024 <= self.agent_gateway_port <= 65535 or self.agent_gateway_port in {self.port, self.dashboard_port}):
             raise ValueError("Agent gateway port must be 0 (off) or a distinct port in 1024–65535")
+        if self.remote_access not in {'dashboard', 'full'}:
+            raise ValueError("Remote access must be dashboard or full")
+        if not isinstance(self.remote_allowed_logins, list) or not all(isinstance(v, str) and v.strip() for v in self.remote_allowed_logins):
+            raise ValueError("Remote allowed logins must be a list of Tailscale login names")
         if not 5 <= self.agent_stale_minutes <= 1440:
             raise ValueError("Agent stale threshold must be 5–1440 minutes")
         if not 1 <= self.session_hours <= 168:
