@@ -37,7 +37,7 @@
     for(const n of document.querySelectorAll('.live-timezone'))n.textContent=s.timezone;
   }
   function chrome(s){
-    for(const n of document.querySelectorAll('.sync-status'))n.textContent=s.remote?'远程只读':'本地看板';
+    for(const n of document.querySelectorAll('.sync-status'))n.textContent=s.remote?'远程只读':s.remoteFull?'远程 · tailnet':'本地看板';
     for(const n of document.querySelectorAll('.live-username'))n.textContent=s.username||'我的空间';
     sources(s);
     for(const n of document.querySelectorAll('.live-capabilities'))n.textContent=s.canComplete?(s.canFocus?'读取 · 重点 · 完成':'读取 · 事项完成'):'只读';
@@ -57,7 +57,7 @@
       const stale=s.health?.sources.filter(x=>x.stale).length||0;
       const issue=s.healthUnavailable?'来源状态暂未读到':failed?failed+' 个来源读取不完整':s.health?.data_stale?'后台心跳过期，数据可能未更新':stale?stale+' 个来源数据过期':'';
       const readAt=new Intl.DateTimeFormat('zh-CN',{timeZone:s.timezone,hour:'2-digit',minute:'2-digit'}).format(new Date(s.now));
-      text.textContent=(s.remote?'远程只读 · ':'本地 · ')+s.items.length+' 项正式事项 · 看板读取 '+readAt+(issue?' · 来源状态需关注：'+issue:'')+(!s.remote&&(!s.focusPrefs||s.focusUnavailable)?' · 重点偏好未读到，保留已读选择或自动推荐':'');
+      text.textContent=(s.remote?'远程只读 · ':s.remoteFull?'远程 · ':'本地 · ')+s.items.length+' 项正式事项 · 看板读取 '+readAt+(issue?' · 来源状态需关注：'+issue:'')+(!s.remote&&(!s.focusPrefs||s.focusUnavailable)?' · 重点偏好未读到，保留已读选择或自动推荐':'');
       root.AcademicServiceView={state:'ready',count:s.items.length,remote:s.remote};return s;
     }catch(error){
       const auth=['auth','setup'].includes(error.code);

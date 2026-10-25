@@ -134,6 +134,15 @@ def test_allowed_logins_restrict_full_mode(tmp_path):
     assert remote.get('/api/v1/items', headers=stranger).status_code == 404
 
 
+def test_remote_login_behind_proxy_accepts_forwarded_host_only(tmp_path):
+    core, remote, _ = setup(tmp_path, remote_access='full')
+    body = {'username': 'owner', 'password': PASSWORD}
+    proxied = {'Origin': 'https://box.example-tailnet.ts.net', 'Host': '127.0.0.1:8766'}
+    assert remote.post('/api/v1/login', json=body, headers=proxied).status_code == 403
+    assert remote.post('/api/v1/login', json=body, headers={**proxied, 'X-Forwarded-Host': 'box.example-tailnet.ts.net'}).status_code == 200
+    assert remote.post('/api/v1/login', json=body, headers={'Origin': 'https://evil.example', 'Host': 'box.example-tailnet.ts.net'}).status_code == 403
+
+
 def test_local_app_ignores_remote_access_setting(tmp_path):
     core, _, agent = setup(tmp_path, remote_access='full')
     local = TestClient(create_app(core))

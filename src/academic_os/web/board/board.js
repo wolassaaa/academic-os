@@ -147,7 +147,7 @@ globalThis.AcademicBoardStart=async function(provided){
   timeStrip.setAttribute('aria-label','时间进程，不是任务完成度');filterbar.before(timeStrip);
   const focusNote=el('div','focus-guidance');focusNote.hidden=true;
   if(!isTasks)document.querySelector('section[aria-label="本周重点"]').before(focusNote);
-  const mainStatus=document.querySelector('.sync-status');if(mainStatus)mainStatus.textContent=snapshot.remote?'远程只读':'本地看板';
+  const mainStatus=document.querySelector('.sync-status');if(mainStatus)mainStatus.textContent=snapshot.remote?'远程只读':snapshot.remoteFull?'远程 · tailnet':'本地看板';
   document.querySelectorAll('.footer>span').forEach(n=>n.textContent='看板 v0.3 · 其他操作在工作台');
   document.querySelector('.pool-foot>span')?.replaceChildren('时间条 / 环表示截止距离');
   function updateNavigation(){

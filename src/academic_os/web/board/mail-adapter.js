@@ -3,12 +3,14 @@
   class MailError extends Error{constructor(code){super(code);this.code=code;}}
   function create(transport){
     let sessionInfo=null;
+    // Remote is read-only unless the server grants tailnet full access.
+    const readonly=s=>!!s&&!!s.remote&&s.access!=='full';
     async function get(path){
       let r;try{r=await transport('/api/v1'+path,{method:'GET',credentials:'same-origin',cache:'no-store',signal:AbortSignal.timeout(15000)});}catch{throw new MailError('offline');}
       if(r.status===401)throw new MailError('auth');if(r.status===403)throw new MailError('remote');if(r.status===404)throw new MailError('missing');if(!r.ok)throw new MailError('http');
       try{return await r.json();}catch{throw new MailError('schema');}
     }
-    async function session(){const s=await get('/session');sessionInfo=s;if(!s.authenticated)throw new MailError('auth');if(s.remote)throw new MailError('remote');return {username:typeof s.username==='string'?s.username:'',canReview:!!s.csrf_token&&!s.remote};}
+    async function session(){const s=await get('/session');sessionInfo=s;if(!s.authenticated)throw new MailError('auth');if(readonly(s))throw new MailError('remote');return {username:typeof s.username==='string'?s.username:'',canReview:!!s.csrf_token&&!readonly(s)};}
     function validDay(value){if(!/^\d{4}-\d{2}-\d{2}$/.test(value||''))return false;const d=new Date(value+'T00:00:00Z');return Number.isFinite(d.getTime())&&d.toISOString().slice(0,10)===value;}
     function params(query){
       const q={q:'',account:'',review:'all',date_mode:'all',start:'',end:'',offset:0,...query};
@@ -31,7 +33,7 @@
       return {...data,username:user.username,canReview:user.canReview,timezone:context.timezone};
     }
     async function review(item,action,changes,operationKey,username){
-      if(sessionInfo?.remote)throw new MailError('remote');
+      if(readonly(sessionInfo))throw new MailError('remote');
       if(!sessionInfo?.authenticated)throw new MailError('auth');
       if(!sessionInfo.csrf_token||sessionInfo.username!==username)throw new MailError('permission');
       if(!item||typeof item.id!=='string'||!Number.isInteger(item.version)||!['confirm','ignore','restore'].includes(action)||!operationKey)throw new MailError('invalid');

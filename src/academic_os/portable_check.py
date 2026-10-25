@@ -87,7 +87,7 @@ def diagnose():
         port, remote_port, gateway_port = free_port(), free_port(), free_port()
         while len({port, remote_port, gateway_port}) < 3:
             remote_port, gateway_port = free_port(), free_port()
-        settings = Settings(data_dir=Path(directory) / "data", port=port, dashboard_port=remote_port, agent_gateway_port=gateway_port)
+        settings = Settings(data_dir=Path(directory) / "data", port=port, dashboard_port=remote_port, agent_gateway_port=gateway_port, remote_access="full")
         config = Path(directory) / "config.json"
         settings.save(config)
         core = Core(Database(settings.database_path), settings)
@@ -144,6 +144,15 @@ def diagnose():
                     assert client.get("/api/v1/health").json()["model_enabled"] is False
                     assert httpx.get(f"http://127.0.0.1:{remote_port}/api/v1/dashboard", trust_env=False).status_code == 401
                     assert httpx.get(f"http://127.0.0.1:{remote_port}/api/v1/items", trust_env=False).status_code == 404
+                    # Remote full mode: tailnet identity unlocks reads; account management stays 404; no identity stays dashboard.
+                    tailnet = {"Tailscale-User-Login": "diagnostic@example.test"}
+                    with httpx.Client(base_url=f"http://127.0.0.1:{remote_port}", trust_env=False, timeout=10) as remote_client:
+                        remote_login = remote_client.post("/api/v1/login", json={"username": "diagnostic", "password": "eight888"}, headers=tailnet)
+                        assert remote_login.status_code == 200
+                        session_cookie = {"Cookie": "aos_remote=" + remote_login.cookies["aos_remote"]}
+                        assert remote_client.get("/api/v1/items", headers={**tailnet, **session_cookie}).status_code == 200
+                        assert remote_client.get("/api/v1/connections", headers={**tailnet, **session_cookie}).status_code == 404
+                        assert remote_client.get("/api/v1/items", headers=session_cookie).status_code == 404
                     # Cross-host agent gateway: bearer required, caller token forwarded to the business API.
                     from .security import Auth
                     agent = Auth(core.db, settings).issue_token(f"diagnostic-gateway-{restart}", ["read"])
@@ -160,7 +169,7 @@ def diagnose():
                 if thread.is_alive():
                     raise RuntimeError("diagnostic_shutdown_failed")
             assert not failures, failures
-        checks += ["http_start_stop_restart", "eight_character_login", "persistent_items", "remote_readonly_boundary", "agent_gateway_bearer", "markdown_export"]
+        checks += ["http_start_stop_restart", "eight_character_login", "persistent_items", "remote_readonly_boundary", "remote_full_tailnet_only", "agent_gateway_bearer", "markdown_export"]
         checks += diagnose_mail_triage(Path(directory) / 'triage')
         # Exercise the packaged parser with the actual Windows trailing-slash shape.
         # The school API and credentials are isolated; no external login is used.

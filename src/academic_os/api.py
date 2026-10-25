@@ -208,7 +208,9 @@ def create_app(core, remote=False, config_path=None, connections=None):
     @app.post("/api/v1/login")
     def login(payload: Login, request: Request, response: Response):
         origin = request.headers.get("origin")
-        if origin and urlparse(origin).netloc != request.headers.get("host"):
+        # A loopback reverse proxy (tailscale serve) may present the public name only as X-Forwarded-Host.
+        hosts = {request.headers.get("host"), request.headers.get("x-forwarded-host") if remote else None} - {None}
+        if origin and urlparse(origin).netloc not in hosts:
             raise HTTPException(403, "Cross-origin login denied")
         try:
             token = auth.login(payload.username, payload.password, request.client.host if request.client else "unknown", remote)
