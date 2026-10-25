@@ -19,6 +19,8 @@ class Settings:
     host: str = "127.0.0.1"
     port: int = 8765
     dashboard_port: int = 8766
+    agent_gateway_port: int = 0  # 0 = off; loopback Streamable HTTP MCP for a cross-host agent
+    agent_stale_minutes: int = 30  # alert when a mail-feed consumer stops polling for this long
     secure_cookies: bool = True
     session_hours: int = 12
     sync_interval_seconds: int = 300
@@ -26,6 +28,7 @@ class Settings:
     google_proxy: str | None = None
     google_network_mode: str = 'auto'
     google_accounts: list[dict] = field(default_factory=list)
+    google_oauth_publishing: str = 'testing'  # Google Cloud Audience; 'testing' grants expire after ~7 days
     feishu: dict = field(default_factory=dict)
     notifications: dict = field(default_factory=lambda: {"email_recipients": [], "email_on_failure": True})
     moodle: dict = field(default_factory=dict)
@@ -46,6 +49,10 @@ class Settings:
             raise ValueError("intervals must be at least 30 seconds")
         if not (1024 <= self.port <= 65535 and 1024 <= self.dashboard_port <= 65535) or self.port == self.dashboard_port:
             raise ValueError("Use distinct ports in 1024–65535")
+        if self.agent_gateway_port and (not 1024 <= self.agent_gateway_port <= 65535 or self.agent_gateway_port in {self.port, self.dashboard_port}):
+            raise ValueError("Agent gateway port must be 0 (off) or a distinct port in 1024–65535")
+        if not 5 <= self.agent_stale_minutes <= 1440:
+            raise ValueError("Agent stale threshold must be 5–1440 minutes")
         if not 1 <= self.session_hours <= 168:
             raise ValueError("Session lifetime must be 1–168 hours")
         if time.fromisoformat(self.availability["start"]) >= time.fromisoformat(self.availability["end"]):
@@ -67,6 +74,8 @@ class Settings:
             proxy = urlparse(self.google_proxy)
             if proxy.scheme not in {"http", "https", "socks5", "socks5h"} or not proxy.hostname or proxy.username or proxy.password:
                 raise ValueError("Proxy must be a URL without inline credentials")
+        if self.google_oauth_publishing not in {'testing', 'production'}:
+            raise ValueError('Google OAuth publishing must be testing or production')
         if self.google_network_mode not in {'auto', 'manual', 'direct'}:
             raise ValueError('Google network mode must be auto, manual or direct')
         if self.google_network_mode == 'manual' and not self.google_proxy:

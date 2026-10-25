@@ -102,7 +102,8 @@ class CalendarSync:
                     self.core.source_health(cursor_key, True, detail={"events_changed": len(events)})
                     results.append({"calendar_id": cal_id, "events": len(events)})
                 except Exception as exc:
-                    self.core.source_health(cursor_key, False, "calendar_pull_failed")
+                    reauthorize = isinstance(exc, ProviderError) and exc.code == 'google_reauthorization_required'
+                    self.core.source_health(cursor_key, False, exc.code if reauthorize else "calendar_pull_failed")
                     results.append({"calendar_id": cal_id, "error": type(exc).__name__})
         return results
 

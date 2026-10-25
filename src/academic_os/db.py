@@ -36,6 +36,7 @@ CREATE INDEX IF NOT EXISTS mail_received_jd ON mail(julianday(received_at) DESC,
 CREATE INDEX IF NOT EXISTS mail_message_identity ON mail(account,json_extract(document,'$.id'));
 CREATE TABLE IF NOT EXISTS mail_feed(sequence INTEGER PRIMARY KEY AUTOINCREMENT, mail_key TEXT NOT NULL UNIQUE, collected_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS mail_consumers(name TEXT PRIMARY KEY, cursor INTEGER NOT NULL DEFAULT 0);
+CREATE TABLE IF NOT EXISTS mail_feed_acks(sequence INTEGER NOT NULL, consumer TEXT NOT NULL, consumed_at TEXT NOT NULL, PRIMARY KEY(sequence, consumer));
 CREATE TRIGGER IF NOT EXISTS mail_arrival_feed AFTER INSERT ON mail BEGIN
     INSERT OR IGNORE INTO mail_feed(mail_key,collected_at) VALUES(NEW.id,strftime('%Y-%m-%dT%H:%M:%fZ','now'));
 END;

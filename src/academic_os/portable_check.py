@@ -84,10 +84,10 @@ def diagnose():
                 sock.bind(("127.0.0.1", 0))
                 return sock.getsockname()[1]
 
-        port, remote_port = free_port(), free_port()
-        while remote_port == port:
-            remote_port = free_port()
-        settings = Settings(data_dir=Path(directory) / "data", port=port, dashboard_port=remote_port)
+        port, remote_port, gateway_port = free_port(), free_port(), free_port()
+        while len({port, remote_port, gateway_port}) < 3:
+            remote_port, gateway_port = free_port(), free_port()
+        settings = Settings(data_dir=Path(directory) / "data", port=port, dashboard_port=remote_port, agent_gateway_port=gateway_port)
         config = Path(directory) / "config.json"
         settings.save(config)
         core = Core(Database(settings.database_path), settings)
@@ -127,7 +127,7 @@ def diagnose():
             try:
                 with httpx.Client(base_url=f"http://127.0.0.1:{port}", trust_env=False, timeout=10) as client:
                     deadline = time.monotonic() + 30
-                    while not (len(runtime.servers) == 2 and all(s.started for s in runtime.servers)):
+                    while not (len(runtime.servers) == 3 and all(s.started for s in runtime.servers)):
                         if failures or time.monotonic() > deadline:
                             raise RuntimeError("diagnostic_startup_failed")
                         time.sleep(.1)
@@ -144,6 +144,15 @@ def diagnose():
                     assert client.get("/api/v1/health").json()["model_enabled"] is False
                     assert httpx.get(f"http://127.0.0.1:{remote_port}/api/v1/dashboard", trust_env=False).status_code == 401
                     assert httpx.get(f"http://127.0.0.1:{remote_port}/api/v1/items", trust_env=False).status_code == 404
+                    # Cross-host agent gateway: bearer required, caller token forwarded to the business API.
+                    from .security import Auth
+                    agent = Auth(core.db, settings).issue_token(f"diagnostic-gateway-{restart}", ["read"])
+                    rpc = {"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "health", "arguments": {}}}
+                    mcp_headers = {"Accept": "application/json, text/event-stream", "Host": "diagnostic.example-tailnet.ts.net"}
+                    gateway = f"http://127.0.0.1:{gateway_port}/mcp"
+                    assert httpx.post(gateway, json=rpc, headers=mcp_headers, trust_env=False, timeout=10).status_code == 401
+                    reply = httpx.post(gateway, json=rpc, headers={**mcp_headers, "Authorization": "Bearer " + agent}, trust_env=False, timeout=10)
+                    assert reply.status_code == 200 and 'authorizations' in json.loads(reply.json()["result"]["content"][0]["text"]), reply.text[:200]
                     assert write_summary(core).is_file()
             finally:
                 stop.set()
@@ -151,7 +160,7 @@ def diagnose():
                 if thread.is_alive():
                     raise RuntimeError("diagnostic_shutdown_failed")
             assert not failures, failures
-        checks += ["http_start_stop_restart", "eight_character_login", "persistent_items", "remote_readonly_boundary", "markdown_export"]
+        checks += ["http_start_stop_restart", "eight_character_login", "persistent_items", "remote_readonly_boundary", "agent_gateway_bearer", "markdown_export"]
         checks += diagnose_mail_triage(Path(directory) / 'triage')
         # Exercise the packaged parser with the actual Windows trailing-slash shape.
         # The school API and credentials are isolated; no external login is used.

@@ -6,7 +6,7 @@ import re
 import time
 import threading
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from .db import dumps
 from . import personal_status
@@ -19,6 +19,15 @@ class Conflict(ValueError):
 
 def utcnow():
     return datetime.now(timezone.utc).isoformat()
+
+
+def moment(value):
+    """Tolerant ISO parse for health/alert paths: naive means UTC, anything unparsable is None (never raises)."""
+    try:
+        parsed = datetime.fromisoformat(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
 
 
 def iso(value):
@@ -307,7 +316,108 @@ class Core:
         age = (datetime.now(timezone.utc) - datetime.fromisoformat(heartbeat)).total_seconds() if heartbeat else None
         return {"mode": self.settings.mode, "model_enabled": False, "heartbeat": heartbeat,
                 "worker_online": age is not None and age < 90, "sources": sources,
+                "authorizations": self.authorizations(sources),
+                "consumers": self.consumers(), "latency": self.pipeline_latency(),
                 "updated_at": utcnow(), "data_stale": age is None or age >= 90}
+
+    def consumers(self):
+        """Mail-feed consumers (Hermes): heartbeat, backlog and ok / never / stale / stuck."""
+        now, limit = datetime.now(timezone.utc), self.settings.agent_stale_minutes * 60
+        with self.db.connect() as db:
+            cursors = dict(db.execute('SELECT name,cursor FROM mail_consumers').fetchall())
+            meta = {k: json.loads(v) for k, v in db.execute("SELECT key,value FROM meta WHERE key LIKE 'consumer-%'")}
+            seen = {k[len('consumer-seen:'):] for k in meta if k.startswith('consumer-seen:')}
+            names = sorted(set(cursors) | seen | ({'hermes'} if self.settings.agent_gateway_port else set()))
+            out = []
+            for name in names:
+                cursor = cursors.get(name, 0)
+                backlog, oldest = db.execute('SELECT COUNT(*),MIN(collected_at) FROM mail_feed WHERE sequence>?', (cursor,)).fetchone()
+                out.append({'name': name, 'cursor': cursor, 'backlog': backlog, 'oldest_unacked_collected_at': oldest})
+        def older(value):
+            value = moment(value)
+            return bool(value) and (now - value).total_seconds() > 2 * limit
+        for entry in out:
+            polled, acked = meta.get('consumer-seen:' + entry['name']), meta.get('consumer-ack:' + entry['name'])
+            online = meta.get('consumer-online-since:' + entry['name'])
+            if not moment(polled):
+                state = 'never'
+            elif (now - moment(polled)).total_seconds() > limit:
+                state = 'stale'
+            elif older(entry['oldest_unacked_collected_at']) and older(online) and (not acked or older(acked)):
+                # Polling continuously for a long time without acknowledging; a reconnect or a draining backlog is not stuck.
+                state = 'stuck'
+            else:
+                state = 'ok'
+            entry.update(last_polled_at=polled, last_ack_at=acked, state=state, stale_after_minutes=self.settings.agent_stale_minutes)
+        return out
+
+    def pipeline_latency(self, window_hours=168):
+        """p50/p95 seconds for received→collected and collected→consumed, over recently received mail only."""
+        # health() runs on every feed/digest/board refresh; these aggregates move slowly (acks invalidate).
+        cached = getattr(self, '_latency_cache', None)
+        if cached and time.monotonic() - cached[0] < 60:
+            return cached[1]
+        value = self._pipeline_latency(window_hours)
+        self._latency_cache = (time.monotonic(), value)
+        return value
+
+    def _pipeline_latency(self, window_hours):
+        start = datetime.now(timezone.utc) - timedelta(hours=window_hours)
+        def stats(values):
+            values = sorted(values)
+            def rank(p):  # nearest-rank percentile
+                return values[max(0, -(-len(values) * p // 100) - 1)]
+            return {'count': len(values), 'p50_seconds': round(rank(50), 1) if values else None, 'p95_seconds': round(rank(95), 1) if values else None}
+        collection, consumption = [], {}
+        with self.db.connect() as db:
+            rows = db.execute('SELECT f.sequence,f.collected_at,m.received_at FROM mail_feed f JOIN mail m ON m.id=f.mail_key ORDER BY f.sequence DESC LIMIT 1000').fetchall()
+            acks = db.execute('SELECT a.consumer,a.consumed_at,f.collected_at FROM mail_feed_acks a JOIN mail_feed f ON f.sequence=a.sequence ORDER BY a.sequence DESC LIMIT 5000').fetchall()
+        for _, collected, received in rows:
+            collected, received = moment(collected), moment(received)
+            if collected and received and received >= start:
+                collection.append(max(0.0, (collected - received).total_seconds()))
+        for name, consumed, collected in acks:
+            consumed, collected = moment(consumed), moment(collected)
+            if consumed and collected and collected >= start:
+                consumption.setdefault(name, []).append(max(0.0, (consumed - collected).total_seconds()))
+        return {'window_hours': window_hours, 'collection': stats(collection),
+                'consumption': {name: stats(values) for name, values in sorted(consumption.items())},
+                'collection_interval_seconds': self.settings.sync_interval_seconds}
+
+    def authorizations(self, sources):
+        """Per Google account: ok / expiring / reauthorization_required / unknown_age, with the Testing-mode 7-day estimate.
+
+        An alerted incident (meta auth-incident:<id>) stays open until a source of that account succeeds after it
+        opened, so an intervening network error cannot masquerade as recovery."""
+        testing = self.settings.google_oauth_publishing == 'testing'
+        with self.db.connect() as db:
+            incidents = {k[len('auth-incident:'):]: json.loads(v) for k, v in db.execute("SELECT key,value FROM meta WHERE key LIKE 'auth-incident:%'")}
+        out = []
+        for account in self.settings.google_accounts:
+            aid = account['id']
+            # Only currently configured sources: rows of a deselected calendar or disabled Gmail are never pruned.
+            configured = {'google:' + aid} | ({'gmail:' + aid} if account.get('gmail', True) else set()) | {
+                f"calendar:google:{aid}:{c['id']}" for c in account.get('calendars', []) if c.get('read', True) or c.get('write')}
+            mine = [s for s in sources if s['id'] in configured]
+            failing = [s for s in mine if s['status'] == 'error' and s.get('error') == 'google_reauthorization_required']
+            opened = incidents.get(aid) if isinstance(incidents.get(aid), dict) else None
+            last_ok = max((t for t in (moment(s.get('last_success')) for s in mine if s['status'] == 'ok') if t), default=None)
+            still_open = opened and not (last_ok and moment(opened.get('opened_at')) and last_ok > moment(opened['opened_at']))
+            authorized = moment(account.get('authorized_at'))
+            expires = authorized + timedelta(days=7) if testing and authorized else None
+            if failing or still_open:
+                state = 'reauthorization_required'
+            elif not testing:
+                state = 'ok'
+            elif not authorized:
+                state = 'unknown_age'
+            else:
+                state = 'expiring' if datetime.now(timezone.utc) >= expires - timedelta(days=2) else 'ok'
+            incident = opened['incident'] if opened else (min((s.get('last_success') or 'never') for s in failing) if failing else None)
+            out.append({'account_id': aid, 'email': account.get('email'), 'state': state, 'publishing': self.settings.google_oauth_publishing,
+                        'authorized_at': authorized.isoformat() if authorized else None, 'expires_estimate': expires.isoformat() if expires else None,
+                        'failing_sources': sorted(s['id'] for s in failing) or (opened or {}).get('sources', []), 'incident': incident})
+        return out
 
     def resolve_conflict(self, conflict_id, choice, expected_version, actor="user"):
         if choice not in {"local", "remote"}:

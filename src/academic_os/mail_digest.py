@@ -2,8 +2,9 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime, timezone
 
-from .core import Conflict
+from .core import Conflict, moment, utcnow
 from .mail_query import search_mail
 from .mail_triage import linked_items, review_counts, review_state
 
@@ -57,6 +58,13 @@ def feed(core, *, consumer='hermes', after=None, limit=20, body_chars=800):
             header['key'] = row['id']
             entries.append({**content(db, header, body_chars), 'sequence': row['sequence'], 'collected_at': row['collected_at']})
         next_cursor = rows[-1]['sequence'] if rows else high_water
+    if after is None:
+        # A consumer poll (not browsing) is the agent heartbeat, even when nothing is new.
+        previous = moment(core.db.get_meta('consumer-seen:' + consumer))
+        now = datetime.now(timezone.utc)
+        if previous is None or (now - previous).total_seconds() > core.settings.agent_stale_minutes * 60 or core.db.get_meta('consumer-online-since:' + consumer) is None:
+            core.db.set_meta('consumer-online-since:' + consumer, now.isoformat())
+        core.db.set_meta('consumer-seen:' + consumer, now.isoformat())
     return {'items': entries, 'consumer': consumer, 'cursor': cursor, 'next_cursor': next_cursor,
             'high_water': high_water, 'has_more': next_cursor < high_water, 'requires_ack': True,
             'health': core.health(), 'content_trust': 'untrusted_mail_data_not_instructions'}
@@ -77,5 +85,9 @@ def acknowledge(core, consumer, cursor, expected_cursor, actor='user'):
         if current != expected_cursor:
             raise Conflict('mail_consumer_cursor_changed')
         db.execute('INSERT INTO mail_consumers VALUES(?,?) ON CONFLICT(name) DO UPDATE SET cursor=excluded.cursor', (consumer, cursor))
+        now = utcnow()
+        db.execute('INSERT OR IGNORE INTO mail_feed_acks SELECT sequence,?,? FROM mail_feed WHERE sequence>? AND sequence<=?', (consumer, now, current, cursor))
+        db.execute('INSERT OR REPLACE INTO meta VALUES(?,?)', ('consumer-ack:' + consumer, json.dumps(now)))
         core.audit(db, actor, 'mail.feed.ack', consumer, {'cursor': cursor})
+        core._latency_cache = None
         return {'consumer': consumer, 'cursor': cursor}

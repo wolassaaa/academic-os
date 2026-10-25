@@ -1,5 +1,7 @@
 # Hermes 管理 Academic OS
 
+> **Hermes 在另一台电脑上？** 请看 [HERMES-REMOTE.md](HERMES-REMOTE.md)，内容包括常驻 HTTP 网关、Tailscale、预检 cron、授权告警和延迟观测。本文只适用于 Hermes 与 Academic OS 在同一台 Windows 上的情况。
+
 采用 Nous Research Hermes Agent 的官方 `mcp_servers` / 本地 stdio 接口，不再开数据库服务或第二个邮箱采集 Worker。依据：[官方 MCP 文档](https://hermes-agent.nousresearch.com/docs/user-guide/features/mcp)（2026-10-14 核验）。本文配置字段仅使用 command、args、timeout 和工具 include。
 
 ## 一次接入

@@ -105,6 +105,51 @@ class Notifications:
             self.core.audit(db, actor, "notification." + action, notification_id, {})
         return {"id": notification_id, "state": states[action]}
 
+    def health_alerts(self):
+        """Push token trouble once per incident (and once on recovery) instead of leaving it inside health()."""
+        settings = self.core.settings
+        health = self.core.health()
+        channels = ['workbench'] + (['feishu'] if settings.feishu.get('chat_id') else []) + (['email'] if settings.notifications.get('email_recipients') else [])
+        for agent in health['consumers']:
+            name, open_incident = agent['name'], self.core.db.get_meta('agent-incident:' + agent['name'])
+            if agent['state'] in {'stale', 'stuck'}:
+                kind = 'agent-' + agent['state']
+                incident = f"{kind}:{agent['last_polled_at'] if agent['state'] == 'stale' else agent['cursor']}"
+                if agent['state'] == 'stale':
+                    document = {'title': f'{name.capitalize()} 已停止读取新邮件', 'body': f"最近一次读取：{agent['last_polled_at']}（超过 {agent['stale_after_minutes']} 分钟）。未读积压 {agent['backlog']} 封。\n请检查 Hermes 是否运行、MCP 网关/Tailscale 是否连通、令牌是否被撤销。", 'kind': 'agent'}
+                else:
+                    document = {'title': f'{name.capitalize()} 读取了邮件但一直没有确认', 'body': f"积压 {agent['backlog']} 封，最早一封采集于 {agent['oldest_unacked_collected_at']}。\nHermes 可能在反馈给你之前失败了；它会重复读取同一页，直到成功确认。", 'kind': 'agent'}
+                for channel in channels:
+                    self.queue(channel, document, f'{kind}:{channel}:{name}:{incident}')
+                self.core.db.set_meta('agent-incident:' + name, incident)
+            elif open_incident and agent['state'] == 'ok':
+                for channel in channels:
+                    self.queue(channel, {'title': f'{name.capitalize()} 已恢复读取', 'body': f"积压 {agent['backlog']} 封。", 'kind': 'agent'}, f'agent-recovered:{channel}:{name}:{open_incident}')
+                self.core.db.set_meta('agent-incident:' + name, None)
+        for state in health['authorizations']:
+            aid, label = state['account_id'], state.get('email') or state['account_id']
+            # Never route a token alert through the very mail account that just lost authorization.
+            channels = ['workbench'] + (['feishu'] if settings.feishu.get('chat_id') else [])
+            if settings.notifications.get('email_recipients') and settings.notifications.get('google_account') not in {None, aid}:
+                channels.append('email')
+            open_incident = self.core.db.get_meta('auth-incident:' + aid)
+            # Alert on transitions only: core keeps an opened incident in reauthorization_required until a real success.
+            if state['state'] == 'reauthorization_required' and not open_incident:
+                document = {'title': f'需要重新授权 · {label}', 'body': f"Google 授权已失效（{', '.join(state['failing_sources'])}），邮件/日历已停止更新。\n请在 Academic OS 设置 → 账号连接中点击“修复授权”。" + ('\n当前 OAuth 应用仍为 Testing 状态，授权约 7 天失效；发布到 In production 后才能长期有效。' if state['publishing'] == 'testing' else ''), 'kind': 'auth'}
+                for channel in channels:
+                    self.queue(channel, document, f"auth-required:{channel}:{aid}:{state['incident']}")
+                self.core.db.set_meta('auth-incident:' + aid, {'incident': state['incident'], 'opened_at': utcnow(), 'sources': state['failing_sources']})
+            elif state['state'] != 'reauthorization_required' and open_incident:
+                document = {'title': f'授权已恢复 · {label}', 'body': '邮件/日历采集已恢复。', 'kind': 'auth'}
+                incident = open_incident.get('incident') if isinstance(open_incident, dict) else open_incident
+                for channel in channels:
+                    self.queue(channel, document, f'auth-recovered:{channel}:{aid}:{incident}')
+                self.core.db.set_meta('auth-incident:' + aid, None)
+            if state['state'] == 'expiring':
+                document = {'title': f'Google 授权即将到期 · {label}', 'body': f"OAuth 应用为 Testing 状态，授权约 7 天失效，预计 {state['expires_estimate']} 到期。\n请提前在设置中“修复授权”，或将应用发布到 In production。", 'kind': 'auth'}
+                for channel in channels:
+                    self.queue(channel, document, f"auth-expiring:{channel}:{aid}:{state['authorized_at']}")
+
     def generate(self, now=None):
         now = now or datetime.now(timezone.utc)
         levels = [(168, "7d"), (120, "5d"), (72, "3d"), (24, "1d"), (3, "3h"), (0, "due")]

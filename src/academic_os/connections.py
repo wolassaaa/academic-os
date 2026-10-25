@@ -197,13 +197,21 @@ class Connections:
         existing = next((a for a in self.core.settings.google_accounts if a.get('email', '').casefold() == email.casefold()), None)
         account_id = requested or (existing['id'] if existing else 'google-' + hashlib.sha256(email.casefold().encode()).hexdigest()[:16])
         ref = 'account-' + account_id
+        try:
+            previous = json.loads(self.secrets.get(ref)).get('refresh_token')
+        except Exception:
+            previous = None
         self.secrets.set(ref, json.dumps(credential))
+        # Testing-mode expiry runs from the grant that issued this refresh token, not from a plain reconnect.
+        fresh = credential.get('refresh_token') != previous
         def update(settings):
             account = next((a for a in settings.google_accounts if a['id'] == account_id), None)
             if account is None:
                 account = {'id': account_id, 'calendars': [], 'gmail': True}
                 settings.google_accounts.append(account)
             account.update(secret_ref=ref, email=email, last_checked=utcnow())
+            if fresh:
+                account['authorized_at'] = utcnow()
         self.save(update)
         return account_id
 

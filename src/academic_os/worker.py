@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import queue
 import threading
 import time
@@ -12,10 +13,12 @@ from .core import identifier, utcnow
 from .db import dumps
 from .exports import write_summary
 from .notifications import Notifications
-from .providers import Feishu, Google
+from .providers import Feishu, Google, ProviderError
 from .security import SecretStore
 from .sources import collect_gmail, collect_local, collect_moodle
 from .mail_triage import formal
+
+log = logging.getLogger(__name__)
 
 
 def has_failure(value):
@@ -151,7 +154,8 @@ class Worker:
             try:
                 result[account["id"]] = collect_gmail(self.core, account, providers[account["id"]])
             except Exception as exc:
-                self.core.source_health("gmail:" + account["id"], False, type(exc).__name__)
+                # Keep provider codes such as google_reauthorization_required; they drive token alerts.
+                self.core.source_health("gmail:" + account["id"], False, exc.code if isinstance(exc, ProviderError) else type(exc).__name__)
                 result[account["id"]] = {"error": type(exc).__name__}
         return result
 
@@ -182,6 +186,11 @@ class Worker:
         if self.core.db.get_meta("notice-minute") == minute:
             return
         self.notifications.generate()
+        try:
+            self.notifications.health_alerts()
+        except Exception as exc:
+            # Health alerts are advisory; never let them block reminders and daily digests.
+            log.warning('health alerts failed (%s)', type(exc).__name__)
         local_now = datetime.now(ZoneInfo(self.core.settings.timezone))
         if local_now.hour >= 9:
             mail_key = 'mail-digest:' + local_now.date().isoformat()
