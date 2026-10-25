@@ -49,3 +49,12 @@ Google 账户配置使用 `id`、`secret_ref`、`gmail`、`school_domains`，日
 **只允许代理 8766，绝不代理 8765。** 保持 `secure_cookies: true`。远程访问 HTTPS 地址并重新登录，确认匿名访问 `/api/v1/dashboard` 返回 401，远程 `/api/v1/items` 与 `/api/v1/setup` 返回 404，HTTP 管理 API 不在代理目标。API Bearer token 不能登录远程只读端。Tailscale 自身的 Windows 无人值守设置另按官方文档配置。
 
 脚本不会执行 Tailscale 发布。公网连通性、证书及手机访问没有实际验证前，应记录为未验收。
+
+### 远程完整模式（只在 tailnet 内）
+
+在 config.json 里设置 `"remote_access": "full"`（建议同时设置 `"remote_allowed_logins": ["你的 Tailscale 登录名"]`），并改用 `tailscale serve --bg --https=443 http://127.0.0.1:8766`，**不要用 funnel**。
+
+- 开放的内容：tailnet 用户登录后可以使用看板、事项、邮件原文和健康状态，并能做日常操作：完成 / 重新打开、邮件候选核对、标签、重点、立即同步。
+- 判断依据是 `Tailscale-User-Login` 身份头：serve 会为 tailnet 用户加上它，并剥掉客户端伪造的同名头；Funnel 流量没有这个头，自动退回只读概览。
+- 账号连接、OAuth / Moodle 登录、配置、令牌、备份恢复和 Agent 接口，在远程端一律返回 404。
+- 远程会话仍需登录，写操作仍要求 CSRF、版本号和幂等键；Agent 的 Bearer 令牌在远程端无效。
