@@ -10,6 +10,50 @@ import threading
 import time
 
 
+def diagnose_mail_triage(directory):
+    from datetime import datetime, timedelta, timezone
+    from .config import Settings
+    from .core import Core
+    from .db import Database, dumps
+    from .mail_query import search_mail
+    from .notifications import Notifications
+
+    settings = Settings(data_dir=Path(directory))
+    core = Core(Database(settings.database_path), settings)
+    due = (datetime.now(timezone.utc) + timedelta(hours=2)).isoformat()
+    with core.db.transaction() as db:
+        db.execute('INSERT INTO mail VALUES(?,?,?,?)', ('diagnostic:m1', 'diagnostic', dumps(
+            {'id': 'm1', 'key': 'diagnostic:m1', 'account': 'diagnostic', 'body': 'offline original', 'subject': 'Diagnostic', 'date_nodes': []}), due))
+    first, second = core.ingest('gmail:diagnostic', [
+        {'source_id': 'm1:deadline', 'title': 'Dated candidate', 'due_at': due, 'review_state': 'needs_analysis'},
+        {'source_id': 'm1:unknown', 'title': 'Undated candidate', 'review_state': 'needs_analysis'}])
+    assert not core.list_items(view='formal')
+    notices = Notifications(core)
+    assert notices.generate()['considered'] == 0 and not notices.list()
+    assert search_mail(core, review='pending')['total'] == 1
+    confirmed = core.review_mail_item(first['id'], 'confirm', first['version'], 'confirm-offline')
+    assert confirmed == core.review_mail_item(first['id'], 'confirm', first['version'], 'confirm-offline')
+    assert notices.generate()['considered'] == 1 and notices.list()
+    ignored = core.review_mail_item(second['id'], 'ignore', second['version'], 'ignore-offline')
+    restored = core.review_mail_item(second['id'], 'restore', ignored['version'], 'restore-offline')
+    assert restored['source_due_at'] is None
+    assert len(core.get_mail('diagnostic:m1')['linked_items']) == 2
+    assert core.get_mail('diagnostic:m1')['body'] == 'offline original'
+    assert len(Core(core.db, settings).list_items(view='formal')) == 1
+    from .tags import Tags
+    from .mail_digest import digest, feed, acknowledge
+    tag = Tags(core).create('Offline course', 'course', 'diagnostic', 'offline-tag')
+    tagged = Tags(core).assign(first['id'], [tag['id']], confirmed['version'], 'offline-tags')
+    assert tagged['tags'][0]['id'] == tag['id']
+    assert Core(core.db, settings).get_item(first['id'])['tags'][0]['id'] == tag['id']
+    assert digest(core)['items'][0]['body_excerpt'] == 'offline original'
+    arrivals = feed(core)
+    assert arrivals['items'][0]['key'] == 'diagnostic:m1'
+    acknowledge(core, 'hermes', arrivals['next_cursor'], 0)
+    assert feed(core)['items'] == []
+    return ['mail_triage_independent_candidates', 'mail_triage_confirm_idempotency', 'mail_triage_reminder_gate', 'mail_triage_ignore_restore_unknown_date', 'mail_triage_links_restart', 'scoped_tags_persistence', 'mail_original_digest', 'mail_durable_feed']
+
+
 def diagnose():
     import certifi
     import httpx
@@ -40,10 +84,10 @@ def diagnose():
                 sock.bind(("127.0.0.1", 0))
                 return sock.getsockname()[1]
 
-        port, remote_port = free_port(), free_port()
-        while remote_port == port:
-            remote_port = free_port()
-        settings = Settings(data_dir=Path(directory) / "data", port=port, dashboard_port=remote_port)
+        port, remote_port, gateway_port = free_port(), free_port(), free_port()
+        while len({port, remote_port, gateway_port}) < 3:
+            remote_port, gateway_port = free_port(), free_port()
+        settings = Settings(data_dir=Path(directory) / "data", port=port, dashboard_port=remote_port, agent_gateway_port=gateway_port, remote_access="full")
         config = Path(directory) / "config.json"
         settings.save(config)
         core = Core(Database(settings.database_path), settings)
@@ -83,7 +127,7 @@ def diagnose():
             try:
                 with httpx.Client(base_url=f"http://127.0.0.1:{port}", trust_env=False, timeout=10) as client:
                     deadline = time.monotonic() + 30
-                    while not (len(runtime.servers) == 2 and all(s.started for s in runtime.servers)):
+                    while not (len(runtime.servers) == 3 and all(s.started for s in runtime.servers)):
                         if failures or time.monotonic() > deadline:
                             raise RuntimeError("diagnostic_startup_failed")
                         time.sleep(.1)
@@ -100,6 +144,24 @@ def diagnose():
                     assert client.get("/api/v1/health").json()["model_enabled"] is False
                     assert httpx.get(f"http://127.0.0.1:{remote_port}/api/v1/dashboard", trust_env=False).status_code == 401
                     assert httpx.get(f"http://127.0.0.1:{remote_port}/api/v1/items", trust_env=False).status_code == 404
+                    # Remote full mode: tailnet identity unlocks reads; account management stays 404; no identity stays dashboard.
+                    tailnet = {"Tailscale-User-Login": "diagnostic@example.test"}
+                    with httpx.Client(base_url=f"http://127.0.0.1:{remote_port}", trust_env=False, timeout=10) as remote_client:
+                        remote_login = remote_client.post("/api/v1/login", json={"username": "diagnostic", "password": "eight888"}, headers=tailnet)
+                        assert remote_login.status_code == 200
+                        session_cookie = {"Cookie": "aos_remote=" + remote_login.cookies["aos_remote"]}
+                        assert remote_client.get("/api/v1/items", headers={**tailnet, **session_cookie}).status_code == 200
+                        assert remote_client.get("/api/v1/connections", headers={**tailnet, **session_cookie}).status_code == 404
+                        assert remote_client.get("/api/v1/items", headers=session_cookie).status_code == 404
+                    # Cross-host agent gateway: bearer required, caller token forwarded to the business API.
+                    from .security import Auth
+                    agent = Auth(core.db, settings).issue_token(f"diagnostic-gateway-{restart}", ["read"])
+                    rpc = {"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "health", "arguments": {}}}
+                    mcp_headers = {"Accept": "application/json, text/event-stream", "Host": "diagnostic.example-tailnet.ts.net"}
+                    gateway = f"http://127.0.0.1:{gateway_port}/mcp"
+                    assert httpx.post(gateway, json=rpc, headers=mcp_headers, trust_env=False, timeout=10).status_code == 401
+                    reply = httpx.post(gateway, json=rpc, headers={**mcp_headers, "Authorization": "Bearer " + agent}, trust_env=False, timeout=10)
+                    assert reply.status_code == 200 and 'authorizations' in json.loads(reply.json()["result"]["content"][0]["text"]), reply.text[:200]
                     assert write_summary(core).is_file()
             finally:
                 stop.set()
@@ -107,7 +169,8 @@ def diagnose():
                 if thread.is_alive():
                     raise RuntimeError("diagnostic_shutdown_failed")
             assert not failures, failures
-        checks += ["http_start_stop_restart", "eight_character_login", "persistent_items", "remote_readonly_boundary", "markdown_export"]
+        checks += ["http_start_stop_restart", "eight_character_login", "persistent_items", "remote_readonly_boundary", "remote_full_tailnet_only", "agent_gateway_bearer", "markdown_export"]
+        checks += diagnose_mail_triage(Path(directory) / 'triage')
         # Exercise the packaged parser with the actual Windows trailing-slash shape.
         # The school API and credentials are isolated; no external login is used.
         import base64

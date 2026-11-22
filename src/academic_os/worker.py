@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import queue
 import threading
 import time
@@ -12,9 +13,12 @@ from .core import identifier, utcnow
 from .db import dumps
 from .exports import write_summary
 from .notifications import Notifications
-from .providers import Feishu, Google
+from .providers import Feishu, Google, ProviderError
 from .security import SecretStore
 from .sources import collect_gmail, collect_local, collect_moodle
+from .mail_triage import formal
+
+log = logging.getLogger(__name__)
 
 
 def has_failure(value):
@@ -150,7 +154,8 @@ class Worker:
             try:
                 result[account["id"]] = collect_gmail(self.core, account, providers[account["id"]])
             except Exception as exc:
-                self.core.source_health("gmail:" + account["id"], False, type(exc).__name__)
+                # Keep provider codes such as google_reauthorization_required; they drive token alerts.
+                self.core.source_health("gmail:" + account["id"], False, exc.code if isinstance(exc, ProviderError) else type(exc).__name__)
                 result[account["id"]] = {"error": type(exc).__name__}
         return result
 
@@ -181,9 +186,24 @@ class Worker:
         if self.core.db.get_meta("notice-minute") == minute:
             return
         self.notifications.generate()
+        try:
+            self.notifications.health_alerts()
+        except Exception as exc:
+            # Health alerts are advisory; never let them block reminders and daily digests.
+            log.warning('health alerts failed (%s)', type(exc).__name__)
         local_now = datetime.now(ZoneInfo(self.core.settings.timezone))
         if local_now.hour >= 9:
-            active = [i for i in self.core.list_items() if i["status"] not in {"completed", "submitted", "cancelled"}]
+            mail_key = 'mail-digest:' + local_now.date().isoformat()
+            with self.core.db.connect() as db:
+                exists = db.execute('SELECT 1 FROM notifications WHERE unique_key=?', (mail_key,)).fetchone()
+            if not exists:
+                from .mail_digest import digest
+                page = digest(self.core, limit=10, body_chars=400)
+                if page['items']:
+                    body = f"最近 {len(page['items'])} / 共 {page['total']} 封；更多邮件见收件箱。原文摘录（非模型总结）\n" + '\n\n'.join(
+                        f"{m.get('subject', '(无主题)')}｜{m.get('from', '')}｜{m.get('received_at', '')}\n{m['body_excerpt']}" + ('\n[已截断，请查看原文]' if m['body_truncated'] else '') for m in page['items'])
+                    self.notifications.queue('workbench', {'title': 'Academic OS 邮件内容简报', 'body': body, 'local_only': True, 'mail_total': page['total']}, mail_key)
+            active = [i for i in self.core.list_items() if formal(i) and i["status"] not in {"completed", "submitted", "cancelled"}]
             document = {"title": "Academic OS 今日简报", "body": "\n".join(f"• {i['title']}｜截止 {i['source_due_at'] or '待公布'}｜安排 {i['scheduled_start'] or '未安排'}" for i in active[:30]) or "暂无待处理事项。"}
             key = "daily:" + local_now.date().isoformat()
             self.notifications.queue("workbench", document, key + ":workbench")
@@ -197,6 +217,14 @@ class Worker:
                 if self.core.settings.feishu.get("chat_id"):
                     self.notifications.queue("feishu", document, key + ":feishu")
         self.core.db.set_meta("notice-minute", minute)
+
+    def export_periodic(self, now=None):
+        now = time.monotonic() if now is None else now
+        if getattr(self, '_last_export', None) is None or now - self._last_export >= 60:
+            path = write_summary(self.core)
+            self._last_export = now
+            return path
+        return None
 
     def run(self, stop: threading.Event):
         if not self.acquire():
@@ -240,7 +268,7 @@ class Worker:
                 job = self.claim()
                 if job:
                     self.execute(job)
-                write_summary(self.core)
+                self.export_periodic()
                 stop.wait(2)
         finally:
             stop.set()

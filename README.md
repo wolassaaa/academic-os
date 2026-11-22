@@ -11,6 +11,10 @@
 ---
 
 
+邮件候选分流与逐条核对见 [迭代 2 使用说明](docs/ITERATION-2.md)。未确认候选保留原邮件和新邮件通知，不产生截止提醒；确认后成为正式邮件待办。
+
+课程／作业／小组多标签、含原文摘录的邮件简报及增量消费见 [迭代 3](docs/ITERATION-3.md)；[Hermes 接入](docs/HERMES.md) · [轻量化实测与后续优先级](docs/PERFORMANCE.md)。
+
 开发路线与检查记录：[迭代计划](docs/ROADMAP.md) · [导入前复核](docs/PROJECT-REVIEW-20261013.md)。当前 main 保存交接源码基线，首轮改进通过独立 PR 审阅。源码及 CI 结果不表示便携 EXE 已更新。
 
 后台首页为“账号与同步”：真实 Google 浏览器授权、多个账号管理、日历选择、Moodle 学校网页登录与旧授权接入。连接保存后立即生效；作业与截止供维护核对，日常使用 Google / Apple 日历即可。[账号连接步骤](docs/CONNECTIONS.md)。
@@ -44,3 +48,10 @@
 源码包不含真实配置、数据库、Credential Manager 凭据或虚拟环境。新电脑需安装 Python 3.11+ 并重新执行 setup。Google/飞书授权、Windows 服务真实安装与重启、第二台电脑及公网 Funnel 验证需在目标环境完成；代码和离线测试不能替代这些验收。
 
 默认 setup 仅安装运行依赖；开发验证使用 `./scripts/setup.ps1 -Development`。安装使用本次验证的 `requirements.lock.txt` 作为版本约束。复用来源与许可见 [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md)。
+
+## 新看板 v0.3
+
+**邮件阅读 v0.4：** 导航“邮件简报”已接服务已收集邮件，支持服务端分页、搜索与收件日期/核对筛选、全文、候选证据及事项双向跳转。当前核对写操作仍在旧工作台完成。详见 [邮件阅读说明](docs/BOARD-MAIL-READ.md)。
+
+**v0.3 个人重点：** 新增持久保存的“设为重点 / 移出重点 / 恢复自动推荐”，与截止、优先级、安排和业务版本独立；逾期提示保留。详见 [个人重点说明](docs/BOARD-FOCUS.md)。
+服务启动后访问 `/board/`，或从旧工作台点击“新看板”。正式事项、时区、来源状态及本地事项完成已接服务；远程仍只读。支持完成确认、版本冲突提示、断线同请求重试、原文证据及精确跳转旧工作台。其他写操作继续在原工作台完成。演示与真实服务严格分开，详见 [读取合同](docs/BOARD-READONLY.md) 和 [本轮完成闭环](docs/BOARD-COMPLETION.md)。源码更新不代表现有便携 EXE 已更新。

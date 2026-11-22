@@ -74,8 +74,9 @@ class Runtime:
         errors = queue.Queue()
         failure = None
         try:
-            # Bind BOTH ports before starting the worker or accepting requests.
-            for attribute in ('port', 'dashboard_port'):
+            # Bind every port before starting the worker or accepting requests.
+            attributes = ('port', 'dashboard_port') + (('agent_gateway_port',) if self.core.settings.agent_gateway_port else ())
+            for attribute in attributes:
                 port = getattr(self.core.settings, attribute)
                 sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
                 sockets.append(sock)
@@ -108,11 +109,15 @@ class Runtime:
                     log.error('%s failed (%s)', name, type(exc).__name__)
                 finally:
                     stop.set()
-            for remote, sock in zip((False, True), sockets):
-                app = create_app(self.core, remote=remote, config_path=self.config_path)
+            apps = [('management', create_app(self.core, remote=False, config_path=self.config_path)),
+                    ('dashboard', create_app(self.core, remote=True, config_path=self.config_path))]
+            if len(sockets) == 3:
+                from .mcp import create_gateway_app
+                apps.append(('agent-gateway', create_gateway_app(f'http://127.0.0.1:{self.core.settings.port}')))
+            for (name, app), sock in zip(apps, sockets):
                 server = uvicorn.Server(uvicorn.Config(app, host='127.0.0.1', log_level='warning', access_log=False, proxy_headers=False, timeout_graceful_shutdown=20))
                 self.servers.append(server)
-                thread = threading.Thread(target=supervise, args=('dashboard' if remote else 'management', lambda server=server, sock=sock: server.run(sockets=[sock])), name='aos-dashboard' if remote else 'aos-management')
+                thread = threading.Thread(target=supervise, args=(name, lambda server=server, sock=sock: server.run(sockets=[sock])), name='aos-' + name)
                 self.threads.append(thread)
                 thread.start()
             deadline = time.monotonic() + startup_timeout

@@ -6,9 +6,11 @@ import re
 import time
 import threading
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from .db import dumps
+from . import personal_status
+from .mail_triage import annotate, formal, invalidate_pending_due, linked_items, migrate, pure_mail, review_state
 
 
 class Conflict(ValueError):
@@ -17,6 +19,15 @@ class Conflict(ValueError):
 
 def utcnow():
     return datetime.now(timezone.utc).isoformat()
+
+
+def moment(value):
+    """Tolerant ISO parse for health/alert paths: naive means UTC, anything unparsable is None (never raises)."""
+    try:
+        parsed = datetime.fromisoformat(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
 
 
 def iso(value):
@@ -41,9 +52,13 @@ class Core:
         self.db, self.settings = db, settings
         self.plan_lock = threading.Lock()
         self.configuration_lock = threading.RLock()
+        from .classification import migrate as migrate_classification
+        migrate_classification(self)
         with self.db.transaction() as connection:
             for row in connection.execute("SELECT document FROM items WHERE json_extract(document,'$.dedup_key') IS NULL AND json_extract(document,'$.course') != ''").fetchall():
                 self._put(connection, json.loads(row[0]))
+        migrate(self)
+        personal_status.migrate(self)
 
     @staticmethod
     def audit(db, actor, action, entity_id, detail):
@@ -54,12 +69,20 @@ class Core:
         row = db.execute("SELECT document FROM items WHERE id=?", (item_id,)).fetchone()
         if not row:
             raise KeyError(item_id)
-        return json.loads(row[0])
+        item = json.loads(row[0])
+        from .tags import item_tags
+        item['tags'] = item_tags(db, item_id)
+        return item
 
     @staticmethod
     def _put(db, item):
+        from .classification import apply
+        apply(item, db)
         item["dedup_key"] = canonical(item["course"]) + ":" + canonical(item["title"]) if item.get("course") else None
-        db.execute("INSERT OR REPLACE INTO items VALUES(?,?,?,?)", (item["id"], dumps(item), item["version"], item["updated_at"]))
+        document = {k: v for k, v in item.items() if k != 'tags'}
+        db.execute("INSERT INTO items VALUES(?,?,?,?) ON CONFLICT(id) DO UPDATE SET document=excluded.document,version=excluded.version,updated_at=excluded.updated_at", (item["id"], dumps(document), item["version"], item["updated_at"]))
+        from .tags import item_tags
+        item['tags'] = item_tags(db, item['id'])
 
     def _new_item(self, data):
         title = str(data.get("title", "")).strip()
@@ -75,7 +98,7 @@ class Core:
         if data.get("review_state", "ready") not in {"ready", "needs_date", "needs_analysis", "conflict"}:
             raise ValueError("Invalid review_state")
         return {"id": identifier("item"), "title": title, "course": str(data.get("course", "")),
-                "kind": data.get("kind", "task"), "status": data.get("status", "pending"),
+                "kind": data.get("kind", "task"), "status": data.get("status", "pending"), "personal_status": None,
                 "source_due_at": due, "deadline_revision": 1, "scheduled_start": None, "scheduled_end": None,
                 "estimate_minutes": estimate, "priority": priority, "weight_pct": data.get("weight_pct"),
                 "review_state": data.get("review_state", "ready" if due else "needs_date"),
@@ -83,6 +106,9 @@ class Core:
 
     def create_item(self, data, actor="user", key=None):
         item = self._new_item(data)
+        item['manual_origin'] = True
+        if 'status' in data:
+            personal_status.record(item, item['status'], actor, utcnow())
         with self.db.transaction() as db:
             if key:
                 fp, replay = self._operation(db, "create:" + key, data)
@@ -98,18 +124,74 @@ class Core:
         with self.db.connect() as db:
             return self._get(db, item_id)
 
-    def list_items(self):
+    def list_items(self, view='all'):
+        if view not in {'all', 'formal', 'mail_pending', 'mail_ignored'}:
+            raise ValueError('Unknown item view')
         with self.db.connect() as db:
-            return [json.loads(r[0]) for r in db.execute("SELECT document FROM items ORDER BY updated_at DESC")]
+            items = [json.loads(r[0]) for r in db.execute("SELECT document FROM items ORDER BY updated_at DESC")]
+            from .tags import attach_tags
+            attach_tags(db, items)
+        return [item for item in items if view == 'all' or view == 'formal' and formal(item)
+                or view == 'mail_pending' and review_state(item) == 'pending'
+                or view == 'mail_ignored' and review_state(item) == 'ignored']
 
-    def update_item(self, item_id, changes, expected_version, actor="user"):
+    def review_mail_item(self, item_id, action, expected_version, key, changes=None, actor='user'):
+        changes = changes or {}
+        if action not in {'confirm', 'ignore', 'restore'} or not key or len(key) > 200:
+            raise ValueError('Invalid mail review action or idempotency key')
+        if set(changes) - {'title', 'source_due_at', 'estimate_minutes', 'priority'} or action != 'confirm' and changes:
+            raise ValueError('Invalid mail review changes')
+        with self.db.transaction() as db:
+            payload = {'item_id': item_id, 'action': action, 'expected_version': expected_version, 'changes': changes}
+            fp, replay = self._operation(db, 'mail-review:' + key, payload)
+            if replay is not None:
+                return replay
+            item = self._get(db, item_id)
+            if item['version'] != expected_version:
+                raise Conflict('item_version_changed')
+            state = review_state(item)
+            if not pure_mail(item) or state != ('ignored' if action == 'restore' else 'pending'):
+                raise Conflict('mail_review_state_changed')
+            if action == 'confirm':
+                if db.execute("SELECT 1 FROM conflicts WHERE item_id=? AND state='open'", (item_id,)).fetchone():
+                    raise Conflict('resolve_conflict_first')
+                old_due = item['source_due_at']
+                item.update(changes)
+                self._new_item(item)
+                item['source_due_at'] = iso(item['source_due_at'])
+                if item['source_due_at'] != old_due:
+                    item['deadline_revision'] = item.get('deadline_revision', 1) + 1
+                item['review_state'] = 'ready' if item['source_due_at'] else 'needs_date'
+            item['mail_review'] = {'state': {'confirm': 'confirmed', 'ignore': 'ignored', 'restore': 'pending'}[action],
+                                   'revision': item.get('mail_review', {}).get('revision', 0) + 1,
+                                   'reviewed_by': actor, 'reviewed_at': utcnow()}
+            item.update(version=item['version'] + 1, updated_at=utcnow())
+            self._put(db, item)
+            invalidate_pending_due(db, item_id)
+            self.audit(db, actor, 'mail.' + action, item_id, {'version': item['version']})
+            db.execute('INSERT INTO operations VALUES(?,?,?)', ('mail-review:' + key, fp, dumps(item)))
+            return item
+
+    def update_item(self, item_id, changes, expected_version, actor="user", request_key=None,
+                    authorize_reopen=None):
         allowed = {"title", "estimate_minutes", "priority", "status", "review_state", "source_due_at"}
         if set(changes) - allowed:
             raise ValueError("Unsupported item fields; use a plan draft to change schedule")
+        if request_key is not None and (not isinstance(request_key, str) or not 1 <= len(request_key) <= 200):
+            raise ValueError("Invalid idempotency key")
         with self.db.transaction() as db:
+            if request_key is not None:
+                operation = 'item-update:' + request_key
+                fp, replay = self._operation(db, operation, {'item_id': item_id, 'changes': changes,
+                                                            'expected_version': expected_version})
+                if replay is not None:
+                    return replay
             item = self._get(db, item_id)
             if item["version"] != expected_version:
                 raise Conflict("item_version_changed")
+            # The permission decision must use the same locked state as the write.
+            if authorize_reopen is not None and "status" in changes and item["status"] in {"completed", "submitted", "cancelled"}:
+                authorize_reopen()
             old_due = item["source_due_at"]
             if "review_state" in changes and changes["review_state"] != "conflict" and db.execute("SELECT 1 FROM conflicts WHERE item_id=? AND state='open'", (item_id,)).fetchone():
                 raise Conflict("resolve_conflict_first")
@@ -119,6 +201,8 @@ class Core:
                 item["source_due_at"] = iso(changes["source_due_at"])
             if item["status"] not in {"pending", "in_progress", "submitted", "completed", "cancelled", "unknown"}:
                 raise ValueError("Invalid status")
+            if "status" in changes:
+                personal_status.record(item, item["status"], actor, utcnow())
             item.update(version=item["version"] + 1, updated_at=utcnow())
             self._put(db, item)
             if old_due != item["source_due_at"]:
@@ -130,6 +214,8 @@ class Core:
                 self._enqueue(db, "calendar_push", {"item_id": item_id, "version": item["version"]}, f"calendar:{item_id}:{item['version']}")
             if item["status"] in {"completed", "submitted", "cancelled"}:
                 db.execute("UPDATE notifications SET state='completed' WHERE item_id=? AND state IN ('queued','failed','snoozed')", (item_id,))
+            if request_key is not None:
+                db.execute("INSERT INTO operations VALUES(?,?,?)", (operation, fp, dumps(item)))
         return item
 
     @staticmethod
@@ -141,12 +227,16 @@ class Core:
         with self.db.transaction() as db:
             for record in records:
                 sid = str(record["source_id"])
-                normalized = {k: record[k] for k in ("title", "course", "kind", "due_at", "submission_status", "url", "weight_pct", "estimate_minutes", "review_state", "evidence_text") if k in record}
+                normalized = {k: record[k] for k in ("title", "course", "course_id", "course_site", "kind", "due_at", "submission_status", "url", "weight_pct", "estimate_minutes", "review_state", "evidence_text") if k in record}
                 if "due_at" in normalized:
                     normalized["due_at"] = iso(normalized["due_at"])
                 previous = db.execute("SELECT * FROM source_records WHERE source=? AND source_id=?", (source, sid)).fetchone()
                 if previous and previous["document"] == dumps(normalized):
-                    out.append(self._get(db, previous["item_id"]))
+                    unchanged = self._get(db, previous['item_id'])
+                    personal_status.initialize(unchanged)
+                    annotate(db, unchanged)
+                    self._put(db, unchanged)
+                    out.append(unchanged)
                     continue
                 item = self._get(db, previous["item_id"]) if previous else None
                 if item is None and normalized.get("course"):
@@ -161,16 +251,24 @@ class Core:
                 new = item is None
                 if new:
                     item = self._new_item(normalized)
+                elif not item.get('evidence'):
+                    item['manual_origin'] = True
                 old_due = item["source_due_at"]
+                if not new:
+                    personal_status.initialize(item)
                 old_status = item["status"]
+                protected = source.startswith('gmail:') and item.get('mail_review', {}).get('state') == 'confirmed'
                 if previous:
                     for field in ("title", "course", "kind", "weight_pct"):
-                        if field in normalized:
+                        if field in normalized and not (protected and field == 'title'):
                             item[field] = normalized[field]
                 due = normalized.get("due_at")
                 existing_evidence = [e for e in item["evidence"] if not (e["source"] == source and e["source_id"] == sid)]
                 if not new and "due_at" in normalized and due != item["source_due_at"]:
-                    if previous and len(existing_evidence) == 0:
+                    if protected:
+                        self._conflict(db, 'source_date', item['id'], {'current': item['source_due_at'], 'incoming': due, 'source': source, 'source_id': sid})
+                        item['review_state'] = 'conflict'
+                    elif previous and len(existing_evidence) == 0:
                         item["source_due_at"] = due
                     elif due and item["source_due_at"]:
                         self._conflict(db, "source_date", item["id"], {"current": item["source_due_at"], "incoming": due, "source": source, "source_id": sid})
@@ -182,10 +280,10 @@ class Core:
                 status = normalized.get("submission_status")
                 # A failed observation is not evidence that submitted work reopened.
                 # Keep the unknown observation in evidence, not as a destructive status update.
-                if status and (status != "unknown" or new or item["status"] == "unknown"):
-                    item["status"] = {"not_started": "pending"}.get(status, status)
-                if item["review_state"] != "conflict":
+                personal_status.observe(item, status, new=new)
+                if item["review_state"] != "conflict" and not protected:
                     item["review_state"] = normalized.get("review_state") or ("ready" if item["source_due_at"] else "needs_date")
+                annotate(db, item)
                 item.update(version=item["version"] if new else item["version"] + 1, updated_at=utcnow())
                 self._put(db, item)
                 if old_due != item["source_due_at"]:
@@ -218,7 +316,108 @@ class Core:
         age = (datetime.now(timezone.utc) - datetime.fromisoformat(heartbeat)).total_seconds() if heartbeat else None
         return {"mode": self.settings.mode, "model_enabled": False, "heartbeat": heartbeat,
                 "worker_online": age is not None and age < 90, "sources": sources,
+                "authorizations": self.authorizations(sources),
+                "consumers": self.consumers(), "latency": self.pipeline_latency(),
                 "updated_at": utcnow(), "data_stale": age is None or age >= 90}
+
+    def consumers(self):
+        """Mail-feed consumers (Hermes): heartbeat, backlog and ok / never / stale / stuck."""
+        now, limit = datetime.now(timezone.utc), self.settings.agent_stale_minutes * 60
+        with self.db.connect() as db:
+            cursors = dict(db.execute('SELECT name,cursor FROM mail_consumers').fetchall())
+            meta = {k: json.loads(v) for k, v in db.execute("SELECT key,value FROM meta WHERE key LIKE 'consumer-%'")}
+            seen = {k[len('consumer-seen:'):] for k in meta if k.startswith('consumer-seen:')}
+            names = sorted(set(cursors) | seen | ({'hermes'} if self.settings.agent_gateway_port else set()))
+            out = []
+            for name in names:
+                cursor = cursors.get(name, 0)
+                backlog, oldest = db.execute('SELECT COUNT(*),MIN(collected_at) FROM mail_feed WHERE sequence>?', (cursor,)).fetchone()
+                out.append({'name': name, 'cursor': cursor, 'backlog': backlog, 'oldest_unacked_collected_at': oldest})
+        def older(value):
+            value = moment(value)
+            return bool(value) and (now - value).total_seconds() > 2 * limit
+        for entry in out:
+            polled, acked = meta.get('consumer-seen:' + entry['name']), meta.get('consumer-ack:' + entry['name'])
+            online = meta.get('consumer-online-since:' + entry['name'])
+            if not moment(polled):
+                state = 'never'
+            elif (now - moment(polled)).total_seconds() > limit:
+                state = 'stale'
+            elif older(entry['oldest_unacked_collected_at']) and older(online) and (not acked or older(acked)):
+                # Polling continuously for a long time without acknowledging; a reconnect or a draining backlog is not stuck.
+                state = 'stuck'
+            else:
+                state = 'ok'
+            entry.update(last_polled_at=polled, last_ack_at=acked, state=state, stale_after_minutes=self.settings.agent_stale_minutes)
+        return out
+
+    def pipeline_latency(self, window_hours=168):
+        """p50/p95 seconds for received→collected and collected→consumed, over recently received mail only."""
+        # health() runs on every feed/digest/board refresh; these aggregates move slowly (acks invalidate).
+        cached = getattr(self, '_latency_cache', None)
+        if cached and time.monotonic() - cached[0] < 60:
+            return cached[1]
+        value = self._pipeline_latency(window_hours)
+        self._latency_cache = (time.monotonic(), value)
+        return value
+
+    def _pipeline_latency(self, window_hours):
+        start = datetime.now(timezone.utc) - timedelta(hours=window_hours)
+        def stats(values):
+            values = sorted(values)
+            def rank(p):  # nearest-rank percentile
+                return values[max(0, -(-len(values) * p // 100) - 1)]
+            return {'count': len(values), 'p50_seconds': round(rank(50), 1) if values else None, 'p95_seconds': round(rank(95), 1) if values else None}
+        collection, consumption = [], {}
+        with self.db.connect() as db:
+            rows = db.execute('SELECT f.sequence,f.collected_at,m.received_at FROM mail_feed f JOIN mail m ON m.id=f.mail_key ORDER BY f.sequence DESC LIMIT 1000').fetchall()
+            acks = db.execute('SELECT a.consumer,a.consumed_at,f.collected_at FROM mail_feed_acks a JOIN mail_feed f ON f.sequence=a.sequence ORDER BY a.sequence DESC LIMIT 5000').fetchall()
+        for _, collected, received in rows:
+            collected, received = moment(collected), moment(received)
+            if collected and received and received >= start:
+                collection.append(max(0.0, (collected - received).total_seconds()))
+        for name, consumed, collected in acks:
+            consumed, collected = moment(consumed), moment(collected)
+            if consumed and collected and collected >= start:
+                consumption.setdefault(name, []).append(max(0.0, (consumed - collected).total_seconds()))
+        return {'window_hours': window_hours, 'collection': stats(collection),
+                'consumption': {name: stats(values) for name, values in sorted(consumption.items())},
+                'collection_interval_seconds': self.settings.sync_interval_seconds}
+
+    def authorizations(self, sources):
+        """Per Google account: ok / expiring / reauthorization_required / unknown_age, with the Testing-mode 7-day estimate.
+
+        An alerted incident (meta auth-incident:<id>) stays open until a source of that account succeeds after it
+        opened, so an intervening network error cannot masquerade as recovery."""
+        testing = self.settings.google_oauth_publishing == 'testing'
+        with self.db.connect() as db:
+            incidents = {k[len('auth-incident:'):]: json.loads(v) for k, v in db.execute("SELECT key,value FROM meta WHERE key LIKE 'auth-incident:%'")}
+        out = []
+        for account in self.settings.google_accounts:
+            aid = account['id']
+            # Only currently configured sources: rows of a deselected calendar or disabled Gmail are never pruned.
+            configured = {'google:' + aid} | ({'gmail:' + aid} if account.get('gmail', True) else set()) | {
+                f"calendar:google:{aid}:{c['id']}" for c in account.get('calendars', []) if c.get('read', True) or c.get('write')}
+            mine = [s for s in sources if s['id'] in configured]
+            failing = [s for s in mine if s['status'] == 'error' and s.get('error') == 'google_reauthorization_required']
+            opened = incidents.get(aid) if isinstance(incidents.get(aid), dict) else None
+            last_ok = max((t for t in (moment(s.get('last_success')) for s in mine if s['status'] == 'ok') if t), default=None)
+            still_open = opened and not (last_ok and moment(opened.get('opened_at')) and last_ok > moment(opened['opened_at']))
+            authorized = moment(account.get('authorized_at'))
+            expires = authorized + timedelta(days=7) if testing and authorized else None
+            if failing or still_open:
+                state = 'reauthorization_required'
+            elif not testing:
+                state = 'ok'
+            elif not authorized:
+                state = 'unknown_age'
+            else:
+                state = 'expiring' if datetime.now(timezone.utc) >= expires - timedelta(days=2) else 'ok'
+            incident = opened['incident'] if opened else (min((s.get('last_success') or 'never') for s in failing) if failing else None)
+            out.append({'account_id': aid, 'email': account.get('email'), 'state': state, 'publishing': self.settings.google_oauth_publishing,
+                        'authorized_at': authorized.isoformat() if authorized else None, 'expires_estimate': expires.isoformat() if expires else None,
+                        'failing_sources': sorted(s['id'] for s in failing) or (opened or {}).get('sources', []), 'incident': incident})
+        return out
 
     def resolve_conflict(self, conflict_id, choice, expected_version, actor="user"):
         if choice not in {"local", "remote"}:
@@ -323,6 +522,8 @@ class Core:
                 return replay
             for change in clean:
                 item = self._get(db, change["item_id"])
+                if not formal(item):
+                    raise Conflict('mail_candidate_requires_review')
                 if item["version"] != change["expected_version"]:
                     raise Conflict("item_version_changed")
             result = {"id": identifier("draft"), "changes": clean, "state": "draft", "created_at": utcnow(), "metadata": metadata or {}}
@@ -349,6 +550,8 @@ class Core:
             items = [self._get(db, c["item_id"]) for c in draft["changes"]]
             self._validate_schedule(db, draft["changes"])
             for item, change in zip(items, draft["changes"]):
+                if not formal(item):
+                    raise Conflict('mail_candidate_requires_review')
                 if item["version"] != change["expected_version"]:
                     raise Conflict("item_version_changed")
                 if item["status"] in {"completed", "submitted", "cancelled"}:
@@ -436,7 +639,9 @@ class Core:
             row = db.execute("SELECT document FROM mail WHERE id=?", (mail_key,)).fetchone()
             if not row:
                 raise KeyError(mail_key)
-            return json.loads(row[0])
+            result = json.loads(row[0])
+            result['linked_items'] = linked_items(db, mail_key)
+            return result
 
     def list_artifacts(self):
         with self.db.connect() as db:

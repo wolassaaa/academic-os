@@ -1,0 +1,31 @@
+const assert=require('node:assert/strict'),path=require('node:path');
+const {create}=require(path.resolve(process.argv[2],'src/academic_os/web/board/service-adapter.js'));
+const Mail=require(path.resolve(process.argv[2],'src/academic_os/web/board/mail-adapter.js'));
+let access='full';const calls=[];
+const response=(data,status=200)=>({ok:status<400,status,json:async()=>data});
+const item={id:'x1',title:'Fixture',status:'pending',version:3};
+const transport=async(url,options)=>{
+ calls.push([url,options.method]);
+ if(options.method==='PATCH')return response({...item,status:'completed',version:4});
+ if(url.endsWith('/session'))return response({authenticated:true,initialized:true,remote:true,access,username:'owner',csrf_token:'csrf'});
+ if(url.endsWith('/board-context'))return response({timezone:'Asia/Taipei',now:'2026-10-25T04:00:00Z'});
+ if(url.endsWith('/dashboard'))return response({items:[item],health:{sources:[]}});
+ if(url.endsWith('/health'))return response({sources:[]});
+ if(url.endsWith('/board-focus'))return response({revision:0,choices:{}});
+ if(url.includes('/mail/digest'))return response({items:[],total:0,limit:20,offset:0,accounts:[],timezone:'Asia/Taipei'});
+ return response([item]);
+};
+(async()=>{
+ const a=create(transport);
+ let s=await a.load();
+ assert.equal(s.remote,false);assert.equal(s.remoteFull,true);assert.equal(s.canComplete,true);
+ assert.ok(calls.some(([u])=>u==='/api/v1/items?view=formal'));assert.ok(!calls.some(([u])=>u.endsWith('/dashboard')));
+ assert.equal((await a.complete(item,'k')).status,'completed');
+ const m=Mail.create(transport);const page=await m.list({});assert.equal(page.canReview,true);
+ access='dashboard';calls.length=0;s=await a.load();
+ assert.equal(s.remote,true);assert.equal(s.remoteFull,false);assert.equal(s.canComplete,false);
+ assert.ok(calls.some(([u])=>u.endsWith('/dashboard')));
+ const before=calls.length;await assert.rejects(a.complete(item,'k'),e=>e.code==='readonly');assert.equal(calls.length,before);
+ await assert.rejects(m.list({}),e=>e.code==='remote');
+ console.log('PASS: remote full access reads formal items/mail and allows completion; dashboard access stays read-only with no write request.');
+})().catch(e=>{console.error(e);process.exitCode=1});
