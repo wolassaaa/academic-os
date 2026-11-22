@@ -21,7 +21,7 @@ academic-os-mcp = "academic_os.mcp:main"
 where = ["src"]
 
 [tool.setuptools.package-data]
-academic_os = ["web/*", "vendor/*.json"]
+academic_os = ["web/*", "web/board/*", "web/board/vendor/*", "vendor/*.json"]
 
 [tool.ruff.lint]
 select = ["E4", "E7", "E9", "F"]

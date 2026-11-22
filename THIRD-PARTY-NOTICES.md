@@ -29,3 +29,5 @@ Python 安装包保留各依赖的 `.dist-info/licenses` / LICENSE 等原始许�
 - Tailscale：[Funnel HTTPS](https://tailscale.com/docs/features/tailscale-funnel)、[Windows 无人值守](https://tailscale.com/docs/how-to/run-unattended)。仅暴露独立只读入口。
 
 没有复制网上不明许可的完整项目。选择这些基础库是为了减少依赖、保持 Windows 可迁移，并避免维护重复的 HTTP、MCP 和重复规则实现。
+
+新看板随包包含 GSAP core 3.15.0，本地动效资源及其原始许可说明见 `src/academic_os/web/board/vendor/THIRD-PARTY-NOTICES.md`。

@@ -3,18 +3,19 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import re
 from html import escape
 from pathlib import Path
 from typing import Literal
 from urllib.parse import urlparse
 
-from fastapi import Body, FastAPI, Header, HTTPException, Request, Response
+from fastapi import Body, FastAPI, Header, HTTPException, Query, Request, Response
 from fastapi.responses import FileResponse, JSONResponse, HTMLResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field
 
 from .calendars import calendar_busy
-from .core import Conflict
+from .core import Conflict, utcnow
 from .db import dumps
 from .exports import write_summary
 from .model_gateway import DisabledModelGateway
@@ -48,6 +49,12 @@ class ItemUpdate(Payload):
     changes: dict
 
 
+class BoardFocus(Payload):
+    item_id: str = Field(min_length=1, max_length=200)
+    mode: Literal['focus', 'pool', 'auto']
+    expected_revision: int = Field(ge=0, strict=True)
+
+
 class Draft(Payload):
     changes: list[dict] = Field(min_length=1, max_length=500)
 
@@ -56,12 +63,72 @@ class Plan(Payload):
     days: int = Field(default=7, ge=1, le=30)
 
 
+class MailReview(Payload):
+    action: Literal['confirm', 'ignore', 'restore']
+    expected_version: int = Field(ge=1)
+    changes: dict = Field(default_factory=dict)
+
+
+class TagCreate(Payload):
+    name: str = Field(min_length=1, max_length=80)
+    kind: Literal['course', 'assignment', 'group', 'custom'] = 'custom'
+    scope: str = Field(default='', max_length=200)
+
+
+class ItemTags(Payload):
+    expected_version: int = Field(ge=1)
+    tag_ids: list[str] = Field(max_length=30)
+
+
+class FeedAck(Payload):
+    consumer: str = Field(min_length=1, max_length=80)
+    cursor: int = Field(ge=0)
+    expected_cursor: int = Field(ge=0)
+
+
+class ClassificationPreview(Payload):
+    expected_version: int = Field(ge=1)
+
+
+class ClassificationRuleUpdate(Payload):
+    expected_revision: int = Field(ge=0)
+    rules: list[dict] = Field(max_length=100)
+
+
+# Remote full mode: what a tailnet browser may call. Everything else on the remote port is 404 —
+# account connections, OAuth/Moodle flows, tokens, config, setup, agent feed, drafts/calendar writes.
+REMOTE_DASHBOARD_ROUTES = {('GET', '/api/v1/session'), ('POST', '/api/v1/login'), ('POST', '/api/v1/logout'),
+                           ('GET', '/api/v1/dashboard'), ('GET', '/api/v1/board-context')}
+REMOTE_FULL_ROUTES = [(method, re.compile(pattern)) for method, pattern in [
+    ('GET', r'/api/v1/(health|items|tags|mail|mail/search|mail/digest|board-focus)'),
+    ('GET', r'/api/v1/items/[^/]+'),
+    ('GET', r'/api/v1/mail/(?!feed$)[^/]+'),
+    ('PATCH', r'/api/v1/items/[^/]+'),
+    ('PUT', r'/api/v1/items/[^/]+/tags'),
+    ('POST', r'/api/v1/items/[^/]+/mail-review'),
+    ('PUT', r'/api/v1/board-focus'),
+    ('POST', r'/api/v1/sync'),
+]]
+
+
 def create_app(core, remote=False, config_path=None, connections=None):
     app = FastAPI(title="Academic OS Remote Dashboard" if remote else "Academic OS 2.0 API", version="2.0.0", docs_url=None if remote else "/docs", redoc_url=None, openapi_url=None if remote else "/openapi.json")
     auth = Auth(core.db, core.settings)
     notifications = Notifications(core)
     cookie = "aos_remote" if remote else "aos_local"
     web = Path(__file__).parent / "web"
+    full = remote and core.settings.remote_access == 'full'
+
+    def tailnet_login(request):
+        # Set by `tailscale serve` for tailnet users and stripped from client input; absent for Funnel traffic.
+        login = request.headers.get('tailscale-user-login', '').strip()
+        allowed = {name.strip().casefold() for name in core.settings.remote_allowed_logins}
+        return login if login and (not allowed or login.casefold() in allowed) else None
+
+    def access(request):
+        if not remote:
+            return 'local'
+        return 'full' if full and tailnet_login(request) else 'dashboard'
 
     @app.exception_handler(Conflict)
     async def conflict_handler(request, exc):
@@ -79,6 +146,13 @@ def create_app(core, remote=False, config_path=None, connections=None):
     async def security_headers(request, call_next):
         if not remote and request.url.hostname not in {"127.0.0.1", "localhost", "testserver"}:
             return JSONResponse({"error": "invalid_management_host"}, status_code=400)
+        if remote and request.url.path.startswith('/api/'):
+            path = request.url.path
+            routes = [(m, p) for m, p in REMOTE_DASHBOARD_ROUTES] + ([(m, rx) for m, rx in REMOTE_FULL_ROUTES] if access(request) == 'full' else [])
+            matches = [m for m, p in routes if (p == path if isinstance(p, str) else p.fullmatch(path))]
+            if request.method not in matches:
+                # Never fall through to the router: a known path with the wrong method is 405, anything else 404.
+                return JSONResponse({"error": "method_not_allowed" if matches else "not_found"}, status_code=405 if matches else 404)
         response = await call_next(request)
         response.headers.update({"X-Content-Type-Options": "nosniff", "X-Frame-Options": "DENY", "Referrer-Policy": "no-referrer", "Content-Security-Policy": "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'", "Cache-Control": "no-store"})
         return response
@@ -110,6 +184,15 @@ def create_app(core, remote=False, config_path=None, connections=None):
 
     if web.exists():
         app.mount("/assets", StaticFiles(directory=web), name="assets")
+    board = web / "board"
+    if board.exists():
+        app.mount("/board", StaticFiles(directory=board, html=True), name="board")
+
+    @app.get("/api/v1/board-context")
+    def board_context(request: Request):
+        principal(request)
+        # Display-only context, not the owner configuration or account metadata.
+        return {"timezone": core.settings.timezone, "now": utcnow(), "semester": None}
 
     @app.get("/api/v1/session")
     def session(request: Request):
@@ -117,13 +200,17 @@ def create_app(core, remote=False, config_path=None, connections=None):
         with core.db.connect() as db:
             initialized = db.execute("SELECT COUNT(*) FROM users").fetchone()[0] > 0
         token = request.cookies.get(cookie)
-        return {"authenticated": bool(user), "username": user, "remote": remote, "initialized": initialized,
+        level = access(request)
+        return {"authenticated": bool(user), "username": user, "remote": remote, "initialized": initialized, "access": level,
+                "tailnet_login": tailnet_login(request) if level == 'full' else None,
                 "csrf_token": hashlib.sha256((token + ":csrf").encode()).hexdigest() if user else None}
 
     @app.post("/api/v1/login")
     def login(payload: Login, request: Request, response: Response):
         origin = request.headers.get("origin")
-        if origin and urlparse(origin).netloc != request.headers.get("host"):
+        # A loopback reverse proxy (tailscale serve) may present the public name only as X-Forwarded-Host.
+        hosts = {request.headers.get("host"), request.headers.get("x-forwarded-host") if remote else None} - {None}
+        if origin and urlparse(origin).netloc not in hosts:
             raise HTTPException(403, "Cross-origin login denied")
         try:
             token = auth.login(payload.username, payload.password, request.client.host if request.client else "unknown", remote)
@@ -142,17 +229,36 @@ def create_app(core, remote=False, config_path=None, connections=None):
     @app.get("/api/v1/dashboard")
     def dashboard(request: Request):
         principal(request)
-        items = core.list_items()
+        all_items = core.list_items()
+        from .mail_triage import review_state
+        pending_mail = sum(review_state(item) == 'pending' for item in all_items)
+        items = core.list_items(view='formal')
         visible = [{k: item[k] for k in ("id", "title", "course", "kind", "status", "source_due_at", "scheduled_start", "scheduled_end", "review_state", "priority", "version")} for item in items]
         notices = [{k: n[k] for k in ("id", "channel", "state", "attempts", "created_at", "last_error")} for n in notifications.list()]
         with core.db.connect() as db:
             mail_count = db.execute("SELECT COUNT(*) FROM mail").fetchone()[0]
         return {"health": core.health(), "items": visible, "calendars": core.list_calendars(), "notifications": notices,
                 "conflicts": [{k: c[k] for k in ("id", "kind", "item_id", "state", "created_at")} for c in core.list_conflicts()],
-                "counts": {"active": sum(i["status"] not in {"completed", "submitted", "cancelled"} for i in items), "mail": mail_count, "review": sum(i["review_state"] != "ready" for i in items), "failed": sum(n["state"] == "failed" for n in notices)}, "remote": remote}
+                "counts": {"active": sum(i["status"] not in {"completed", "submitted", "cancelled"} for i in items), "mail": mail_count, "mail_pending": pending_mail, "review": sum(i["review_state"] != "ready" for i in items), "failed": sum(n["state"] == "failed" for n in notices)}, "remote": remote}
 
-    if remote:
+    if remote and not full:
         return app
+
+    def board_user(request):
+        username = principal(request, 'confirm')
+        if request.headers.get('authorization', '').startswith('Bearer '):
+            raise HTTPException(403, 'Personal preferences require a local browser session')
+        return username
+
+    @app.get('/api/v1/board-focus')
+    def board_focus_read(request: Request):
+        from .board_focus import read
+        return read(core, board_user(request))
+
+    @app.put('/api/v1/board-focus')
+    def board_focus_write(payload: BoardFocus, request: Request, idempotency_key: str | None = Header(default=None)):
+        from .board_focus import write
+        return write(core, board_user(request), payload.item_id, payload.mode, payload.expected_revision, key(idempotency_key))
 
     @app.get('/api/v1/instance', include_in_schema=False)
     def instance(request: Request):
@@ -182,6 +288,8 @@ def create_app(core, remote=False, config_path=None, connections=None):
         return JSONResponse({'error': connection_error_message(exc)}, status_code=502)
 
     def owner(request):
+        if remote:
+            raise HTTPException(404)  # account management is local-only, even in remote full mode
         actor = principal(request)
         if actor == 'agent':
             raise HTTPException(403, 'Account management requires owner login')
@@ -308,9 +416,69 @@ def create_app(core, remote=False, config_path=None, connections=None):
         return core.health()
 
     @app.get("/api/v1/items")
-    def items(request: Request):
+    def items(request: Request, view: str = 'all', tag: list[str] = Query(default=[])):
         principal(request)
-        return core.list_items()
+        from .tags import Tags
+        return Tags.filter_items(core.list_items(view=view), tag)
+
+    @app.get('/api/v1/tags')
+    def tags(request: Request, include_archived: bool = False):
+        principal(request)
+        from .tags import Tags
+        return Tags(core).list(include_archived)
+
+    @app.get('/api/v1/classification/spec')
+    def classification_spec(request: Request):
+        principal(request)
+        from .classification_ai import specification
+        return specification()
+
+    @app.get('/api/v1/classification/rules')
+    def classification_rules(request: Request):
+        principal(request)
+        from .classification import ClassificationRules
+        return ClassificationRules(core).get()
+
+    @app.put('/api/v1/classification/rules')
+    def classification_rules_update(payload: ClassificationRuleUpdate, request: Request):
+        actor = owner(request)
+        from .classification import ClassificationRules
+        return ClassificationRules(core).replace(payload.rules, payload.expected_revision, actor)
+
+    @app.post('/api/v1/items/{item_id}/classification/ai-preview')
+    def classification_preview(item_id: str, payload: ClassificationPreview, request: Request):
+        principal(request)
+        item = core.get_item(item_id)
+        if item['version'] != payload.expected_version:
+            raise Conflict('item_version_changed')
+        from .classification_ai import DisabledClassificationAI
+        return DisabledClassificationAI().propose({'item_id': item_id, 'item_version': item['version'],
+                                                   'classification_fingerprint': item['classification']['fingerprint'],
+                                                   'rules_revision': item['classification']['rules_revision'],
+                                                   'unresolved_fields': item['classification']['unresolved_fields']})
+
+    @app.post('/api/v1/tags')
+    def add_tag(payload: TagCreate, request: Request, idempotency_key: str | None = Header(default=None)):
+        actor = principal(request, 'draft')
+        from .tags import Tags
+        return Tags(core).create(payload.name, payload.kind, payload.scope, key(idempotency_key), actor)
+
+    @app.patch('/api/v1/tags/{tag_id}')
+    def update_tag(tag_id: str, payload: ItemUpdate, request: Request):
+        actor = principal(request, 'draft')
+        from .tags import Tags
+        return Tags(core).update(tag_id, payload.changes, payload.expected_version, actor)
+
+    @app.put('/api/v1/items/{item_id}/tags')
+    def assign_tags(item_id: str, payload: ItemTags, request: Request, idempotency_key: str | None = Header(default=None)):
+        actor = principal(request, 'draft')
+        from .tags import Tags
+        return Tags(core).assign(item_id, payload.tag_ids, payload.expected_version, key(idempotency_key), actor)
+
+    @app.post('/api/v1/items/{item_id}/mail-review')
+    def mail_review(item_id: str, payload: MailReview, request: Request, idempotency_key: str | None = Header(default=None)):
+        actor = principal(request, 'confirm')
+        return core.review_mail_item(item_id, payload.action, payload.expected_version, key(idempotency_key), payload.changes, actor)
 
     @app.get("/api/v1/items/{item_id}")
     def item(item_id: str, request: Request):
@@ -323,13 +491,16 @@ def create_app(core, remote=False, config_path=None, connections=None):
         return core.create_item(payload.model_dump(), actor, key(idempotency_key))
 
     @app.patch("/api/v1/items/{item_id}")
-    def update_item(item_id: str, payload: ItemUpdate, request: Request):
+    def update_item(item_id: str, payload: ItemUpdate, request: Request,
+                    idempotency_key: str | None = Header(default=None)):
         actor = principal(request, "draft")
         if "source_due_at" in payload.changes or payload.changes.get("status") in {"completed", "submitted", "cancelled"}:
             principal(request, "confirm")
         if "title" in payload.changes and core.get_item(item_id).get("scheduled_start"):
             principal(request, "confirm")
-        return core.update_item(item_id, payload.changes, payload.expected_version, actor)
+        return core.update_item(item_id, payload.changes, payload.expected_version, actor,
+                                request_key=key(idempotency_key) if idempotency_key is not None else None,
+                                authorize_reopen=lambda: principal(request, "confirm"))
 
     @app.get("/api/v1/mail")
     def mail(request: Request, limit: int = 100, offset: int = 0, q: str | None = None):
@@ -339,11 +510,30 @@ def create_app(core, remote=False, config_path=None, connections=None):
     @app.get("/api/v1/mail/search")
     def mail_search(request: Request, limit: int = 50, offset: int = 0, q: str | None = None,
                     account: str | None = None, date_mode: str = "all",
-                    start: str | None = None, end: str | None = None):
+                    start: str | None = None, end: str | None = None, review: str = 'all'):
         principal(request)
         from .mail_query import search_mail
         return search_mail(core, limit=limit, offset=offset, q=q, account=account,
-                           date_mode=date_mode, start=start, end=end)
+                           date_mode=date_mode, start=start, end=end, review=review)
+
+    @app.get('/api/v1/mail/digest')
+    def mail_digest(request: Request, limit: int = 20, offset: int = 0, body_chars: int = 800,
+                    account: str | None = None, date_mode: str = 'all', start: str | None = None, end: str | None = None, review: str = 'all', q: str | None = None):
+        principal(request)
+        from .mail_digest import digest
+        return digest(core, limit=limit, offset=offset, body_chars=body_chars, account=account, date_mode=date_mode, start=start, end=end, review=review, q=q)
+
+    @app.get('/api/v1/mail/feed')
+    def mail_feed(request: Request, consumer: str = 'hermes', after: int | None = None, limit: int = 20, body_chars: int = 800):
+        principal(request)
+        from .mail_digest import feed
+        return feed(core, consumer=consumer, after=after, limit=limit, body_chars=body_chars)
+
+    @app.post('/api/v1/mail/feed/ack')
+    def mail_feed_ack(payload: FeedAck, request: Request):
+        actor = principal(request, 'sync')
+        from .mail_digest import acknowledge
+        return acknowledge(core, payload.consumer, payload.cursor, payload.expected_cursor, actor)
 
     @app.get("/api/v1/mail/{mail_key}")
     def mail_detail(mail_key: str, request: Request):
