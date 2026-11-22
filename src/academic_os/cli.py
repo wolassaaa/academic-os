@@ -66,6 +66,10 @@ def parser():
     legacy = commands.add_parser('import-legacy')
     legacy.add_argument('root', type=Path)
     legacy.add_argument('--import-credentials', action='store_true')
+    kpi = commands.add_parser('kpi', help='Read-only weekly KPI report (service stopped; use /api/v1/kpi or MCP kpi_report while running)')
+    kpi.add_argument('--days', type=int, default=7)
+    kpi.add_argument('--markdown', action='store_true', help='Print Markdown instead of JSON')
+    kpi.add_argument('--save', action='store_true', help='Also write data/exports/kpi-YYYY-Www.md')
     package = commands.add_parser('package')
     package.add_argument('output', type=Path)
     package.add_argument('--source', type=Path, default=Path(__file__).resolve().parents[2])
@@ -190,6 +194,13 @@ def main(argv=None):
                 return 0
             if args.command == 'cutover':
                 print(json.dumps(cutover(core, config, args.backup_dir, args.legacy_stopped), ensure_ascii=False))
+                return 0
+            if args.command == 'kpi':
+                from .kpi import render_markdown, save_markdown, weekly_report
+                report = weekly_report(core, days=args.days)
+                if args.save:
+                    report['saved_to'] = str(save_markdown(core, report))
+                print(render_markdown(report) if args.markdown else json.dumps(report, ensure_ascii=False, indent=2))
                 return 0
             if args.command == 'token-revoke':
                 with core.db.transaction() as db:

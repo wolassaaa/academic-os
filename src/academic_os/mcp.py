@@ -140,6 +140,12 @@ def build_server(proxy, allow_confirm=False, **settings):
         return proxy.request('GET', '/health')
 
     @server.tool()
+    def kpi_report(days: int = 7) -> dict:
+        """Read-only v1.0 KPI report over the last `days` (1–31): push latency, mail-candidate precision, plan coverage,
+        re-authorizations, agent heartbeat, duplicate calendar events and stale sources. Unmeasurable KPIs say why."""
+        return proxy.request('GET', f'/kpi?days={int(days)}')
+
+    @server.tool()
     def list_items(view: str = 'all', tag_ids: list[str] | None = None) -> list | dict:
         """Read academic items with evidence, status, versions and deadlines."""
         from urllib.parse import urlencode
