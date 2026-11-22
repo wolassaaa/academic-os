@@ -121,7 +121,7 @@ def test_official_streamable_http_client_feed_ack_and_scope(business, gateway):
         async with streamablehttp_client(gateway, headers={'Authorization': 'Bearer ' + readonly}) as (r, w, _), ClientSession(r, w) as session:
             await session.initialize()
             names = {tool.name for tool in (await session.list_tools()).tools}
-            assert {'health', 'mail_feed', 'acknowledge_mail_feed'} <= names and 'confirm_draft' not in names
+            assert {'health', 'kpi_report', 'mail_feed', 'acknowledge_mail_feed'} <= names and 'confirm_draft' not in names
             page = await call(session, 'mail_feed', {})
             denied = await call(session, 'acknowledge_mail_feed', {'consumer': 'hermes', 'cursor': page['next_cursor'], 'expected_cursor': 0})
             assert denied['http_status'] == 403

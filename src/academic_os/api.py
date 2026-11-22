@@ -415,6 +415,12 @@ def create_app(core, remote=False, config_path=None, connections=None):
         principal(request)
         return core.health()
 
+    @app.get("/api/v1/kpi")
+    def kpi(request: Request, days: int = Query(default=7, ge=1, le=31)):
+        principal(request)
+        from .kpi import weekly_report
+        return weekly_report(core, days=days)
+
     @app.get("/api/v1/items")
     def items(request: Request, view: str = 'all', tag: list[str] = Query(default=[])):
         principal(request)
